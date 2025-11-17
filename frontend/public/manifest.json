@@ -1,0 +1,17 @@
+{
+  "name": "KrypticTrack",
+  "short_name": "Kryptic",
+  "description": "Inverse Reinforcement Learning + neural logging for a personal second brain.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fdf4c3",
+  "theme_color": "#a31d1d",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

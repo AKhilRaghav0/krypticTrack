@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import FloatingDock from './FloatingDock'
 import ThreeBackground from './ThreeBackground'
+import Spotlight from './Spotlight'
 
 interface LayoutProps {
   children: ReactNode
@@ -16,6 +17,7 @@ export default function Layout({ children }: LayoutProps) {
         </div>
       </main>
       <FloatingDock />
+      <Spotlight />
     </div>
   )
 }

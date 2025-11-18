@@ -168,7 +168,8 @@ class MaxEntIRL:
         expert_trajectories: List[List[Tuple[np.ndarray, np.ndarray]]],
         num_epochs: int = 50,
         batch_size: int = 64,
-        verbose: bool = True
+        verbose: bool = True,
+        callback: callable = None
     ) -> Dict:
         """
         Train reward model using Maximum Entropy IRL.
@@ -254,6 +255,10 @@ class MaxEntIRL:
             history['loss'].append(avg_loss)
             history['reward_mean'].append(avg_reward)
             history['reward_std'].append(std_reward)
+            
+            # Call callback if provided
+            if callback:
+                callback(epoch + 1, num_epochs, avg_loss, avg_reward, std_reward)
             
             if verbose:
                 print(f"Epoch {epoch+1}/{num_epochs} | "

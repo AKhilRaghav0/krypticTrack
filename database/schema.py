@@ -29,7 +29,14 @@ def create_tables(db_connection):
             final_loss REAL,
             accuracy REAL,
             model_path TEXT,
-            notes TEXT
+            notes TEXT,
+            -- Data range tracking
+            first_action_id INTEGER,
+            last_action_id INTEGER,
+            first_timestamp REAL,
+            last_timestamp REAL,
+            total_actions_used INTEGER,
+            data_sources TEXT  -- JSON array of sources used
         )
     """)
     

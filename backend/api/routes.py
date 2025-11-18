@@ -689,11 +689,25 @@ def run_training(num_epochs=50, learning_rate=0.001, batch_size=64):
                 with training_lock:
                     training_state['model_path'] = str(models[0])
         
+        # Get metadata from training state
+        data_metadata = None
         with training_lock:
             training_state['status'] = 'completed'
             training_state['progress'] = 100
             training_state['completed_at'] = time.time()
             training_state['message'] = 'Training completed successfully!'
+            data_metadata = training_state.get('data_metadata')
+        
+        # Save training run metadata to database
+        if data_metadata:
+            try:
+                # We need to access the database, but we're in a background thread
+                # So we'll save it to a file that the main thread can read, or use a queue
+                # For now, we'll save it to training_state and the /model/status endpoint will save it
+                # Actually, let's try to get db from a global or save it via a callback
+                pass  # Will be handled by a separate endpoint call
+            except:
+                pass
         
         # Reload model after training completes
         # Note: We can't access current_app in background thread, so we'll reload on next request
@@ -813,10 +827,255 @@ def stop_training():
     }), 200
 
 
+@api_bp.route('/model/new-data', methods=['GET'])
+def get_new_data_since_last_training():
+    """Get information about new data since last training run."""
+    try:
+        db = current_app.config.get('db')
+        if not db:
+            return jsonify({'error': 'Database not available'}), 500
+        
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        # Get last training run
+        cursor.execute("""
+            SELECT id, completed_at, last_timestamp, total_actions_used, first_timestamp
+            FROM training_runs
+            WHERE completed_at IS NOT NULL
+            ORDER BY completed_at DESC
+            LIMIT 1
+        """)
+        
+        last_run = cursor.fetchone()
+        
+        if not last_run:
+            # No previous training, return all data stats
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_actions,
+                    MIN(timestamp) as first_timestamp,
+                    MAX(timestamp) as last_timestamp,
+                    COUNT(DISTINCT source) as sources_count
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+            """)
+            stats = cursor.fetchone()
+            
+            return jsonify({
+                'has_previous_training': False,
+                'new_actions_count': stats[0] if stats else 0,
+                'first_timestamp': stats[1] if stats else None,
+                'last_timestamp': stats[2] if stats else None,
+                'sources_count': stats[3] if stats else 0,
+                'message': 'No previous training found. All data is new.'
+            }), 200
+        
+        last_run_id, last_completed_at, last_timestamp, total_actions_used, first_timestamp = last_run
+        
+        # Get new actions since last training
+        if last_timestamp:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as new_actions,
+                    MIN(timestamp) as first_new_timestamp,
+                    MAX(timestamp) as last_new_timestamp,
+                    COUNT(DISTINCT source) as new_sources_count,
+                    GROUP_CONCAT(DISTINCT source) as new_sources
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+                AND timestamp > ?
+            """, (last_timestamp,))
+        else:
+            # Fallback: use completed_at time
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as new_actions,
+                    MIN(timestamp) as first_new_timestamp,
+                    MAX(timestamp) as last_new_timestamp,
+                    COUNT(DISTINCT source) as new_sources_count,
+                    GROUP_CONCAT(DISTINCT source) as new_sources
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+                AND timestamp > ?
+            """, (last_completed_at,))
+        
+        new_data = cursor.fetchone()
+        new_actions_count, first_new_timestamp, last_new_timestamp, new_sources_count, new_sources_str = new_data
+        
+        # Get action type breakdown for new data
+        if last_timestamp:
+            cursor.execute("""
+                SELECT action_type, COUNT(*) as count
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+                AND timestamp > ?
+                GROUP BY action_type
+                ORDER BY count DESC
+                LIMIT 10
+            """, (last_timestamp,))
+        else:
+            cursor.execute("""
+                SELECT action_type, COUNT(*) as count
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+                AND timestamp > ?
+                GROUP BY action_type
+                ORDER BY count DESC
+                LIMIT 10
+            """, (last_completed_at,))
+        
+        action_breakdown = [{'action_type': row[0], 'count': row[1]} for row in cursor.fetchall()]
+        
+        # Get source breakdown
+        if last_timestamp:
+            cursor.execute("""
+                SELECT source, COUNT(*) as count
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+                AND timestamp > ?
+                GROUP BY source
+                ORDER BY count DESC
+            """, (last_timestamp,))
+        else:
+            cursor.execute("""
+                SELECT source, COUNT(*) as count
+                FROM actions
+                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
+                AND timestamp > ?
+                GROUP BY source
+                ORDER BY count DESC
+            """, (last_completed_at,))
+        
+        source_breakdown = [{'source': row[0], 'count': row[1]} for row in cursor.fetchall()]
+        
+        new_sources = new_sources_str.split(',') if new_sources_str else []
+        
+        return jsonify({
+            'has_previous_training': True,
+            'last_training': {
+                'id': last_run_id,
+                'completed_at': last_completed_at,
+                'last_timestamp': last_timestamp,
+                'total_actions_used': total_actions_used
+            },
+            'new_data': {
+                'actions_count': new_actions_count or 0,
+                'first_timestamp': first_new_timestamp,
+                'last_timestamp': last_new_timestamp,
+                'sources_count': new_sources_count or 0,
+                'sources': new_sources,
+                'action_breakdown': action_breakdown,
+                'source_breakdown': source_breakdown
+            },
+            'ready_for_training': (new_actions_count or 0) >= 100,
+            'message': f'Found {new_actions_count or 0} new actions since last training' if new_actions_count else 'No new data since last training'
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/actions/search', methods=['GET'])
+def search_actions():
+    """Search actions by query string."""
+    try:
+        query = request.args.get('q', '').lower()
+        if not query:
+            return jsonify({'results': []}), 200
+        
+        db = current_app.config.get('db')
+        if not db:
+            return jsonify({'results': []}), 200
+        
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        # Search in action_type, source, and context_json
+        cursor.execute("""
+            SELECT id, timestamp, source, action_type, context_json
+            FROM actions
+            WHERE 
+                LOWER(action_type) LIKE ? OR
+                LOWER(source) LIKE ? OR
+                LOWER(context_json) LIKE ?
+            ORDER BY timestamp DESC
+            LIMIT 20
+        """, (f'%{query}%', f'%{query}%', f'%{query}%'))
+        
+        rows = cursor.fetchall()
+        results = []
+        
+        for row in rows:
+            try:
+                context = json.loads(row[4]) if row[4] else {}
+            except:
+                context = {}
+            
+            results.append({
+                'id': row[0],
+                'timestamp': row[1],
+                'source': row[2],
+                'action_type': row[3],
+                'context': context
+            })
+        
+        conn.close()
+        return jsonify({'results': results}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e), 'results': []}), 200
+
+
 @api_bp.route('/model/status', methods=['GET'])
 def model_status():
     """Get model training status and latest model info."""
     global training_state
+    
+    # Save training metadata to database if available and training just completed
+    db = current_app.config.get('db')
+    if db:
+        with training_lock:
+            data_metadata = training_state.get('data_metadata')
+            if data_metadata and training_state.get('status') == 'completed':
+                try:
+                    conn = db.connect()
+                    cursor = conn.cursor()
+                    
+                    # Check if this training run was already saved
+                    cursor.execute("""
+                        SELECT id FROM training_runs 
+                        WHERE started_at = ? AND completed_at = ?
+                    """, (data_metadata.get('started_at'), data_metadata.get('completed_at')))
+                    
+                    if not cursor.fetchone():
+                        # Save training run metadata
+                        cursor.execute("""
+                            INSERT INTO training_runs 
+                            (started_at, completed_at, num_epochs, final_loss, model_path,
+                             first_action_id, last_action_id, first_timestamp, last_timestamp,
+                             total_actions_used, data_sources)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            data_metadata.get('started_at'),
+                            data_metadata.get('completed_at'),
+                            data_metadata.get('num_epochs'),
+                            data_metadata.get('final_loss'),
+                            data_metadata.get('model_path'),
+                            data_metadata.get('first_action_id'),
+                            data_metadata.get('last_action_id'),
+                            data_metadata.get('first_timestamp'),
+                            data_metadata.get('last_timestamp'),
+                            data_metadata.get('total_actions'),
+                            json.dumps(data_metadata.get('sources', []))
+                        ))
+                        conn.commit()
+                        # Clear metadata from state to prevent duplicate saves
+                        training_state['data_metadata'] = None
+                    conn.close()
+                except Exception as e:
+                    # Log error but don't fail the request
+                    pass
     
     with training_lock:
         status = training_state.copy()

@@ -63,8 +63,8 @@ start_system_logger() {
         source venv/bin/activate
     fi
     
-    # Start system logger in background
-    python data_collection/system_logger.py > logs/system_logger.log 2>&1 &
+    # Start enhanced Linux brain logger in background (tracks shell history, browser history, etc.)
+    python data_collection/linux_brain_logger.py > logs/system_logger.log 2>&1 &
     SYSTEM_LOGGER_PID=$!
     echo $SYSTEM_LOGGER_PID > "$SYSTEM_LOGGER_PID_FILE"
     

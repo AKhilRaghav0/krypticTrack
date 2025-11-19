@@ -78,6 +78,25 @@ def create_tables(db_connection):
         )
     """)
     
+    # Work Sessions (daily work goals and analysis)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS work_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,  -- YYYY-MM-DD format
+            start_time REAL NOT NULL,
+            end_time REAL,
+            planned_work TEXT,  -- What user planned to work on
+            actual_summary TEXT,  -- LLM-generated summary of actual work
+            time_wasted_minutes REAL,  -- Time wasted on distractions
+            idle_time_minutes REAL,  -- Time spent idle
+            focused_time_minutes REAL,  -- Time spent focused
+            distractions TEXT,  -- JSON array of distractions
+            achievements TEXT,  -- JSON array of achievements
+            insights TEXT,  -- LLM-generated insights
+            created_at REAL DEFAULT (strftime('%s', 'now'))
+        )
+    """)
+    
     # Legacy tables (for backward compatibility with existing data collection)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS keystrokes (
@@ -125,10 +144,17 @@ def create_tables(db_connection):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_source ON actions(source)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_type ON actions(action_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_session_id ON actions(session_id)")
+    # Composite index for common query pattern: source + timestamp
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_source_timestamp ON actions(source, timestamp)")
+    # Composite index for type + timestamp queries
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_actions_type_timestamp ON actions(action_type, timestamp)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_timestamp ON predictions(timestamp)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_was_correct ON predictions(was_correct)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_insights_discovered ON insights(discovered_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_training_runs_started ON training_runs(started_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_work_sessions_date ON work_sessions(date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_work_sessions_start_time ON work_sessions(start_time)")
     
     db_connection.commit()
     print("✅ Database tables created successfully")

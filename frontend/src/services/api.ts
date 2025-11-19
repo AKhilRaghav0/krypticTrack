@@ -49,10 +49,14 @@ class ApiService {
     )
   }
 
-  async sendChatMessage(message: string) {
+  async sendChatMessage(message: string, intent?: string, searchResults?: any[]) {
     return this.request<{ response: string; model: string; error?: string }>('/llm/chat', {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ 
+        message,
+        intent,
+        search_results: searchResults || []
+      }),
       signal: AbortSignal.timeout(120000), // 120s for LLM
     })
   }
@@ -75,6 +79,12 @@ class ApiService {
   async getActions(limit = 50) {
     return this.request<{ actions: any[]; total: number }>(
       `/recent-actions?limit=${limit}&sort=timestamp&order=desc`
+    )
+  }
+
+  async searchActions(query: string, limit = 20) {
+    return this.request<{ actions: any[]; total: number }>(
+      `/actions/search?q=${encodeURIComponent(query)}&limit=${limit}`
     )
   }
 
@@ -101,6 +111,8 @@ class ApiService {
       loaded: boolean
       accuracy?: number
       training_status?: string
+      model_path?: string
+      load_time?: number
     }>('/model/info')
   }
 
@@ -161,6 +173,110 @@ class ApiService {
 
   async getTrainingLogs() {
     return this.request<{ logs: string[] }>('/training/logs')
+  }
+
+  async listModels() {
+    return this.request<{
+      models: Array<{
+        path: string
+        name: string
+        size_mb: number
+        modified: number
+        formatted_date: string
+        is_current: boolean
+      }>
+    }>('/model/list')
+  }
+
+  async selectModel(modelPath: string) {
+    return this.request<{ success: boolean; message: string }>('/model/select', {
+      method: 'POST',
+      body: JSON.stringify({ model_path: modelPath }),
+    })
+  }
+
+  // Work Session endpoints
+  async startWorkSession(plannedWork: string) {
+    return this.request<{
+      success: boolean
+      session: {
+        session_id: number
+        date: string
+        start_time: number
+        planned_work: string
+        status: string
+      }
+    }>('/work-session/start', {
+      method: 'POST',
+      body: JSON.stringify({ planned_work: plannedWork }),
+    })
+  }
+
+  async endWorkSession(sessionId?: number) {
+    return this.request<{
+      success: boolean
+      session: {
+        session_id: number
+        date: string
+        start_time: number
+        end_time: number
+        planned_work: string
+        analysis: {
+          summary: string
+          insights: string
+          time_wasted_minutes: number
+          idle_time_minutes: number
+          focused_time_minutes: number
+          distractions: Array<{ type: string; name: string; time_minutes: number }>
+          achievements: Array<{ type: string; count: number }>
+        }
+      }
+    }>('/work-session/end', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId }),
+      signal: AbortSignal.timeout(180000), // 3 minutes for analysis
+    })
+  }
+
+  async getTodayWorkSession() {
+    return this.request<{
+      success: boolean
+      session: {
+        session_id: number
+        date: string
+        start_time: number
+        end_time?: number
+        planned_work: string
+        actual_summary?: string
+        time_wasted_minutes?: number
+        idle_time_minutes?: number
+        focused_time_minutes?: number
+        distractions?: Array<any>
+        achievements?: Array<any>
+        insights?: string
+        status: 'active' | 'completed'
+      } | null
+      message?: string
+    }>('/work-session/today')
+  }
+
+  async getWorkSessionHistory(limit = 30) {
+    return this.request<{
+      success: boolean
+      sessions: Array<{
+        session_id: number
+        date: string
+        start_time: number
+        end_time?: number
+        planned_work: string
+        actual_summary?: string
+        time_wasted_minutes?: number
+        idle_time_minutes?: number
+        focused_time_minutes?: number
+        insights?: string
+      }>
+      count: number
+    }>(`/work-session/history?limit=${limit}`)
   }
 }
 

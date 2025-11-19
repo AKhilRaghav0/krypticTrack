@@ -1,99 +1,296 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-* {
+:root {
+  --primary: #d4a574;
+  --secondary: #a31d1d;
+  --tertiary: #6c757d;
+}
+
+html, body {
   margin: 0;
   padding: 0;
-  box-sizing: border-box;
-}
-
-:root {
-  /* Color Palette - Warm, Professional, No Blue/Violet */
-  --primary: #d4a574;      /* Beige */
-  --primary-dark: #b8935f;
-  --primary-light: #e8c9a0;
-  --secondary: #a31d1d;    /* Deep Red */
-  --secondary-dark: #7a1515;
-  --secondary-light: #c92a2a;
-  --tertiary: #6c757d;     /* Warm Gray */
-  --tertiary-dark: #495057;
-  --tertiary-light: #868e96;
-  
-  --bg-primary: #f8f9fa;
-  --bg-secondary: #ffffff;
-  --text-primary: #212529;
-  --text-secondary: #495057;
-  --text-muted: #6c757d;
-  --border: #dee2e6;
-  --shadow: rgba(0, 0, 0, 0.1);
-}
-
-body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  line-height: 1.6;
+  background-color: #000000;
+  color: #f3f4f6;
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 code {
-  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
 }
 
-/* Smooth transitions */
-* {
-  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+/* Spotlight Animations */
+@keyframes spotlightFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+@keyframes spotlightSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
-::-webkit-scrollbar-track {
-  background: var(--bg-primary);
+.spotlight-overlay {
+  animation: spotlightFadeIn 0.2s ease-out;
 }
 
-::-webkit-scrollbar-thumb {
-  background: var(--tertiary-light);
+.spotlight-container {
+  animation: spotlightSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Custom scrollbars for Spotlight - Better visibility */
+.spotlight-scroll {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch; /* iOS smooth scrolling */
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.spotlight-scroll::-webkit-scrollbar {
+  width: 8px; /* Show scrollbar */
+}
+
+.spotlight-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
   border-radius: 4px;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--tertiary);
+.spotlight-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  transition: background 0.2s;
 }
 
-/* Animations */
-@keyframes slideUp {
+.spotlight-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+/* macOS Design System */
+.macos-layout {
+  background: #000000;
+}
+
+.macos-dock {
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  background: rgba(0, 0, 0, 0.6);
+  box-shadow: 
+    0 8px 32px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.macos-dock-item {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transform-origin: center bottom;
+}
+
+.macos-dock-item:hover {
+  transform: scale(1.15) translateY(-4px);
+}
+
+.macos-dock-item:active {
+  transform: scale(1.05) translateY(-2px);
+}
+
+/* Floating Chat Animation */
+.floating-chat-container {
+  animation: chatSlideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: bottom center;
+}
+
+@keyframes chatSlideUp {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(100%) scale(0.9);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
-@keyframes fadeIn {
-  from {
-    opacity: 0;
+.floating-chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+}
+
+.floating-chat-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.floating-chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.floating-chat-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.floating-chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.macos-card {
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  background: rgba(17, 24, 39, 0.9);
+  box-shadow: 
+    0 8px 32px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.macos-button {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: all 0.2s ease;
+}
+
+.macos-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+@keyframes boom {
+  0% {
+    transform: scale(1);
   }
-  to {
+  50% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-boom {
+  animation: boom 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+}
+
+/* Thinking Indicator */
+@keyframes thinkingPulse {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
     opacity: 1;
   }
 }
 
-.animate-slide-up {
-  animation: slideUp 0.3s ease-out;
+.thinking-chevron {
+  animation: thinkingPulse 1.5s ease-in-out infinite;
 }
 
-.animate-fade-in {
-  animation: fadeIn 0.3s ease-out;
+/* Liquid Glass Effect - Darker for better readability */
+.liquid-glass {
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 
+    0 8px 32px 0 rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.liquid-glass-dark {
+  background: rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 
+    0 8px 32px 0 rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Shimmer Effect for Icons */
+@keyframes shimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+.shimmer-icon {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+}
+
+.shimmer-icon::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(212, 165, 116, 0.4) 50%,
+    transparent 100%
+  );
+  animation: skeletonShine 2s ease-in-out infinite;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.shimmer-icon svg {
+  position: relative;
+  z-index: 0;
+  color: var(--primary, #d4a574);
+}
+
+@keyframes skeletonShine {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+/* Spotlight Collapsed State */
+.spotlight-collapsed {
+  width: 600px;
+  max-width: 90vw;
+  height: 60px;
+  border-radius: 16px;
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.spotlight-expanded {
+  width: 100%;
+  max-width: 1200px;
+  height: auto;
+  max-height: 85vh;
+  border-radius: 24px;
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }

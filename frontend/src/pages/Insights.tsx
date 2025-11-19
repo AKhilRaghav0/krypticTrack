@@ -21,9 +21,9 @@ export default function Insights() {
   }
 
   const getInsightColor = (confidence: number) => {
-    if (confidence >= 0.8) return 'bg-green-50 text-green-700 border-green-200'
-    if (confidence >= 0.6) return 'bg-yellow-50 text-yellow-700 border-yellow-200'
-    return 'bg-gray-50 text-gray-700 border-gray-200'
+    if (confidence >= 0.8) return 'bg-green-900/30 text-green-400 border-green-700'
+    if (confidence >= 0.6) return 'bg-yellow-900/30 text-yellow-400 border-yellow-700'
+    return 'bg-gray-700/50 text-gray-300 border-gray-600'
   }
 
   useEffect(() => {
@@ -101,27 +101,27 @@ export default function Insights() {
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-8 pb-6 border-b border-gray-200">
-        <h1 className="text-4xl font-bold text-gray-900 tracking-tight mb-2">
+      <div className="mb-8 pb-6 border-b border-gray-700">
+        <h1 className="text-4xl font-bold text-gray-100 tracking-tight mb-2">
           Insights
         </h1>
-        <p className="text-lg text-gray-600 max-w-2xl leading-relaxed">
+        <p className="text-lg text-gray-400 max-w-2xl leading-relaxed">
           Discovered patterns and behavioral insights from your activity data
         </p>
       </div>
 
       <div className="space-y-6">
         {loading ? (
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
+          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-12 text-center">
             <div className="text-gray-500">Loading insights...</div>
           </div>
         ) : insights.length === 0 ? (
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
+          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-12 text-center">
             <Lightbulb className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+            <h3 className="text-lg font-semibold text-gray-100 mb-2">
               No insights yet
             </h3>
-            <p className="text-gray-600">
+            <p className="text-gray-400">
               Insights will appear here as we analyze your behavior patterns
             </p>
           </div>
@@ -134,7 +134,7 @@ export default function Insights() {
               return (
                 <div
                   key={insight.id}
-                  className={`bg-white rounded-xl border-2 ${colorClass} shadow-sm p-6 hover:shadow-md transition-all`}
+                  className={`bg-gray-800/50 backdrop-blur-sm rounded-xl border-2 ${colorClass} shadow-lg p-6 hover:shadow-xl transition-all`}
                 >
                   <div className="flex items-start gap-4 mb-4">
                     <div className={`w-12 h-12 ${colorClass} rounded-xl flex items-center justify-center flex-shrink-0`}>
@@ -142,19 +142,19 @@ export default function Insights() {
                     </div>
                     <div className="flex-1">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
                           {insight.pattern_type.replace(/_/g, ' ')}
                         </span>
                         <span className="text-xs font-semibold">
                           {Math.round(insight.confidence * 100)}% confidence
                         </span>
                       </div>
-                      <p className="text-gray-900 leading-relaxed">
+                      <p className="text-gray-100 leading-relaxed">
                         {insight.description}
                       </p>
                     </div>
                   </div>
-                  <div className="text-xs text-gray-500">
+                  <div className="text-xs text-gray-400">
                     Discovered{' '}
                     {new Date(insight.discovered_at).toLocaleDateString()}
                   </div>
@@ -165,18 +165,18 @@ export default function Insights() {
         )}
 
         {/* Surprised Me Section */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-          <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-6">
+          <h2 className="text-xl font-bold text-gray-100 mb-4 flex items-center gap-2">
             <Sparkle className="w-5 h-5" />
             Surprised Me
           </h2>
-          <p className="text-gray-600 mb-4">
+          <p className="text-gray-400 mb-4">
             Get a random but true insight about your behavior powered by AI
           </p>
           <button
             onClick={handleSurprisedMe}
             disabled={llmLoading}
-            className="px-4 py-2 bg-secondary-500 text-white rounded-lg font-semibold hover:bg-secondary-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className="px-4 py-2 bg-[#a31d1d] text-white rounded-lg font-semibold hover:bg-[#7a1515] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {llmLoading ? (
               <>
@@ -191,13 +191,13 @@ export default function Insights() {
             )}
           </button>
           {!llmAvailable && !llmLoading && (
-            <p className="text-sm text-gray-500 mt-2">
+            <p className="text-sm text-gray-400 mt-2">
               ⚠️ LLM service may not be available. Click the button to try anyway - it will check status automatically.
             </p>
           )}
           {llmInsight && (
-            <div className="mt-4 p-4 bg-primary-50 border border-primary-200 rounded-lg">
-              <p className="text-gray-800 leading-relaxed">{llmInsight}</p>
+            <div className="mt-4 p-4 bg-[#d4a574]/20 border border-[#d4a574]/30 rounded-lg">
+              <p className="text-gray-100 leading-relaxed">{llmInsight}</p>
             </div>
           )}
         </div>

@@ -85,12 +85,22 @@ export default function ThreeBackground() {
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize)
-      if (animationIdRef.current) {
+      if (animationIdRef.current !== null) {
         cancelAnimationFrame(animationIdRef.current)
+        animationIdRef.current = null
       }
-      if (rendererRef.current && containerRef.current) {
-        containerRef.current.removeChild(rendererRef.current.domElement)
+      if (rendererRef.current && containerRef.current && rendererRef.current.domElement.parentNode === containerRef.current) {
+        try {
+          containerRef.current.removeChild(rendererRef.current.domElement)
+        } catch (e) {
+          // Element might already be removed
+        }
         rendererRef.current.dispose()
+        rendererRef.current = null
+      }
+      if (sceneRef.current) {
+        sceneRef.current.clear()
+        sceneRef.current = null
       }
     }
   }, [])

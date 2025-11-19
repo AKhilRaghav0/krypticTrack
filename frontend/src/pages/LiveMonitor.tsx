@@ -51,13 +51,13 @@ export default function LiveMonitor() {
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-8 pb-6 border-b border-gray-200">
+      <div className="mb-8 pb-6 border-b border-gray-700">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-4xl font-bold text-gray-900 tracking-tight mb-2">
+            <h1 className="text-4xl font-bold text-gray-100 tracking-tight mb-2">
               Live Monitor
             </h1>
-            <p className="text-lg text-gray-600 max-w-2xl leading-relaxed">
+            <p className="text-lg text-gray-400 max-w-2xl leading-relaxed">
               Real-time activity tracking and monitoring
             </p>
           </div>
@@ -65,8 +65,8 @@ export default function LiveMonitor() {
             <div
               className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
                 isMonitoring
-                  ? 'bg-green-50 text-green-700'
-                  : 'bg-gray-100 text-gray-600'
+                  ? 'bg-green-900/30 text-green-400 border border-green-700'
+                  : 'bg-gray-700/50 text-gray-400 border border-gray-600'
               }`}
             >
               <div
@@ -80,7 +80,7 @@ export default function LiveMonitor() {
             </div>
             <button
               onClick={() => setIsMonitoring(!isMonitoring)}
-              className="px-4 py-2 bg-secondary-500 text-white rounded-lg font-semibold hover:bg-secondary-600 transition-all"
+              className="px-4 py-2 bg-[#a31d1d] text-white rounded-lg font-semibold hover:bg-[#7a1515] transition-all"
             >
               {isMonitoring ? 'Pause' : 'Resume'}
             </button>
@@ -90,30 +90,30 @@ export default function LiveMonitor() {
 
       <div className="space-y-6">
         {/* Live Activity Stream */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-700 bg-gray-800/50 flex items-center justify-between">
+            <h2 className="text-lg font-bold text-gray-100 flex items-center gap-2">
               <Pulse className="w-5 h-5" />
               Live Activity Stream
             </h2>
             <div className="flex items-center gap-3">
-              <div className="text-sm text-gray-500">
+              <div className="text-sm text-gray-400">
                 {actions.length} recent actions
               </div>
               {newActionCount > 0 && (
-                <div className="px-2 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded-full animate-pulse">
+                <div className="px-2 py-1 bg-green-900/30 text-green-400 border border-green-700 text-xs font-semibold rounded-full animate-pulse">
                   +{newActionCount} new
                 </div>
               )}
             </div>
           </div>
-          <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
+          <div className="divide-y divide-gray-700 max-h-[600px] overflow-y-auto">
             {loading ? (
-              <div className="px-6 py-16 text-center text-gray-500">
+              <div className="px-6 py-16 text-center text-gray-400">
                 Loading live activity...
               </div>
             ) : actions.length === 0 ? (
-              <div className="px-6 py-16 text-center text-gray-500">
+              <div className="px-6 py-16 text-center text-gray-400">
                 No activity yet. Start using your applications to see live tracking.
               </div>
             ) : (
@@ -127,9 +127,9 @@ export default function LiveMonitor() {
                 return (
                   <div
                     key={action.id || idx}
-                    className={`px-6 py-4 hover:bg-gray-50 transition-all ${
+                    className={`px-6 py-4 hover:bg-gray-700/50 transition-all ${
                       isNew
-                        ? 'bg-green-50 border-l-4 border-green-500 animate-slide-up'
+                        ? 'bg-green-900/30 border-l-4 border-green-500 animate-slide-up'
                         : 'animate-fade-in'
                     }`}
                   >
@@ -141,10 +141,10 @@ export default function LiveMonitor() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm font-semibold text-gray-900">
+                          <span className="text-sm font-semibold text-gray-100">
                             {actionName}
                           </span>
-                          <span className="text-xs text-gray-500">
+                          <span className="text-xs text-gray-400">
                             {new Date(action.timestamp * 1000).toLocaleTimeString([], {
                               hour: '2-digit',
                               minute: '2-digit',
@@ -154,16 +154,16 @@ export default function LiveMonitor() {
                           <span className={`px-2 py-0.5 text-xs font-semibold rounded-full ${
                             isNew
                               ? 'bg-green-500 text-white animate-pulse'
-                              : 'bg-green-100 text-green-700'
+                              : 'bg-green-900/30 text-green-400 border border-green-700'
                           }`}>
                             {isNew ? 'NEW' : 'LIVE'}
                           </span>
                         </div>
-                            <div className="text-xs text-gray-600">
+                            <div className="text-xs text-gray-400">
                               Source: {action.source.toUpperCase()} •{' '}
                               {new Date(action.timestamp * 1000).toLocaleDateString()}
                               {action.source === 'system' && action.context && (
-                                <span className="ml-2 text-secondary-600">
+                                <span className="ml-2 text-[#a31d1d]">
                                   • {action.context.app || action.context.from_app || 'OS Activity'}
                                 </span>
                               )}
@@ -179,11 +179,11 @@ export default function LiveMonitor() {
 
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-2">
+          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-6">
+            <div className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">
               Actions Today
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-3xl font-bold text-gray-100">
               {actions.filter(
                 (a: any) =>
                   new Date(a.timestamp * 1000).toLocaleDateString() ===
@@ -192,20 +192,20 @@ export default function LiveMonitor() {
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-2">
+          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-6">
+            <div className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">
               Active Sources
             </div>
-              <div className="text-3xl font-bold text-gray-900">
+              <div className="text-3xl font-bold text-gray-100">
                 {stats?.active_sources || new Set(actions.map((a: any) => a.source)).size}
               </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-2">
+          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-6">
+            <div className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">
               Last Action
             </div>
-            <div className="text-sm font-semibold text-gray-900">
+            <div className="text-sm font-semibold text-gray-100">
               {actions.length > 0
                 ? new Date(actions[0].timestamp * 1000).toLocaleTimeString()
                 : 'N/A'}

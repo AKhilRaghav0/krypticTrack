@@ -27,27 +27,27 @@ export default function Activity() {
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-8 pb-6 border-b border-gray-200">
-        <h1 className="text-4xl font-bold text-gray-900 tracking-tight mb-2">
+      <div className="mb-8 pb-6 border-b border-gray-700">
+        <h1 className="text-4xl font-bold text-gray-100 tracking-tight mb-2">
           Activity
         </h1>
-        <p className="text-lg text-gray-600 max-w-2xl leading-relaxed">
+        <p className="text-lg text-gray-400 max-w-2xl leading-relaxed">
           View and filter your activity history
         </p>
       </div>
 
       <div className="space-y-6">
         {/* Filters */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="block text-sm font-medium text-gray-300 mb-2">
                 Source
               </label>
               <select
                 value={sourceFilter}
                 onChange={(e) => setSourceFilter(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-secondary-500 focus:border-transparent"
+                className="w-full px-4 py-2 border border-gray-600 bg-gray-700/50 text-gray-100 rounded-lg focus:ring-2 focus:ring-[#a31d1d] focus:border-transparent"
               >
                 <option value="">All Sources</option>
                 {uniqueSources.map((source) => (
@@ -59,13 +59,13 @@ export default function Activity() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="block text-sm font-medium text-gray-300 mb-2">
                 Action Type
               </label>
               <select
                 value={actionTypeFilter}
                 onChange={(e) => setActionTypeFilter(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-secondary-500 focus:border-transparent"
+                className="w-full px-4 py-2 border border-gray-600 bg-gray-700/50 text-gray-100 rounded-lg focus:ring-2 focus:ring-[#a31d1d] focus:border-transparent"
               >
                 <option value="">All Types</option>
                 {uniqueActionTypes.map((type) => (
@@ -77,13 +77,13 @@ export default function Activity() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="block text-sm font-medium text-gray-300 mb-2">
                 Sort By
               </label>
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-secondary-500 focus:border-transparent"
+                className="w-full px-4 py-2 border border-gray-600 bg-gray-700/50 text-gray-100 rounded-lg focus:ring-2 focus:ring-[#a31d1d] focus:border-transparent"
               >
                 <option value="timestamp">Most Recent</option>
                 <option value="source">Source</option>
@@ -92,8 +92,8 @@ export default function Activity() {
             </div>
 
             <div className="flex items-end">
-              <div className="text-sm text-gray-600">
-                <span className="font-semibold">{total.toLocaleString()}</span> total
+              <div className="text-sm text-gray-400">
+                <span className="font-semibold text-gray-300">{total.toLocaleString()}</span> total
                 actions
               </div>
             </div>
@@ -101,17 +101,17 @@ export default function Activity() {
         </div>
 
         {/* Activity Feed */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
-            <h2 className="text-lg font-bold text-gray-900">Recent Activity</h2>
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-700 bg-gray-800/50">
+            <h2 className="text-lg font-bold text-gray-100">Recent Activity</h2>
           </div>
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-gray-700">
             {loading ? (
-              <div className="px-6 py-16 text-center text-gray-500">
+              <div className="px-6 py-16 text-center text-gray-400">
                 Loading actions...
               </div>
             ) : filteredActions.length === 0 ? (
-              <div className="px-6 py-16 text-center text-gray-500">
+              <div className="px-6 py-16 text-center text-gray-400">
                 No actions found
               </div>
             ) : (
@@ -123,7 +123,7 @@ export default function Activity() {
                 return (
                   <div
                     key={idx}
-                    className="px-6 py-4 hover:bg-gray-50 transition-colors"
+                    className="px-6 py-4 hover:bg-gray-700/50 transition-colors"
                   >
                     <div className="flex items-start gap-4">
                       <div
@@ -133,17 +133,17 @@ export default function Activity() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-sm font-semibold text-gray-900">
+                          <span className="text-sm font-semibold text-gray-100">
                             {actionName}
                           </span>
-                          <span className="text-xs text-gray-500">
+                          <span className="text-xs text-gray-400">
                             {new Date(action.timestamp * 1000).toLocaleTimeString([], {
                               hour: '2-digit',
                               minute: '2-digit',
                             })}
                           </span>
                         </div>
-                        <div className="text-xs text-gray-600">
+                        <div className="text-xs text-gray-400">
                           {action.source.toUpperCase()} •{' '}
                           {new Date(action.timestamp * 1000).toLocaleDateString()}
                         </div>
@@ -157,38 +157,38 @@ export default function Activity() {
         </div>
 
         {/* Actions Table */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
-            <h2 className="text-lg font-bold text-gray-900">Actions Table</h2>
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-700 bg-gray-800/50">
+            <h2 className="text-lg font-bold text-gray-100">Actions Table</h2>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-gray-50 sticky top-0 z-10">
+              <thead className="bg-gray-800/50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">
                     Action
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">
                     Source
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">
                     Type
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">
                     Details
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-gray-700">
                 {loading ? (
                   <tr>
-                    <td colSpan={4} className="px-6 py-12 text-center text-gray-500">
+                    <td colSpan={4} className="px-6 py-12 text-center text-gray-400">
                       Loading actions...
                     </td>
                   </tr>
                 ) : filteredActions.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-6 py-12 text-center text-gray-500">
+                    <td colSpan={4} className="px-6 py-12 text-center text-gray-400">
                       No actions yet
                     </td>
                   </tr>
@@ -199,7 +199,7 @@ export default function Activity() {
                     const actionName = formatActionType(action.action_type)
 
                     return (
-                      <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <tr key={idx} className="hover:bg-gray-700/50 transition-colors">
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <div
@@ -208,10 +208,10 @@ export default function Activity() {
                               <Icon className={`w-4 h-4 ${colors.text}`} />
                             </div>
                             <div>
-                              <div className="text-sm font-medium text-gray-900">
+                              <div className="text-sm font-medium text-gray-100">
                                 {actionName}
                               </div>
-                              <div className="text-xs text-gray-500">
+                              <div className="text-xs text-gray-400">
                                 {new Date(action.timestamp * 1000).toLocaleString([], {
                                   month: 'short',
                                   day: 'numeric',
@@ -228,10 +228,10 @@ export default function Activity() {
                           </span>
                         </td>
                         <td className="px-6 py-4">
-                          <span className="text-sm text-gray-700">{actionName}</span>
+                          <span className="text-sm text-gray-300">{actionName}</span>
                         </td>
                         <td className="px-6 py-4">
-                          <span className="text-sm text-gray-600">
+                          <span className="text-sm text-gray-400">
                             {JSON.stringify(action.context || {})}
                           </span>
                         </td>

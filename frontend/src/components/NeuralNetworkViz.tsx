@@ -79,6 +79,10 @@ export default function NeuralNetworkViz() {
       if (!ctx) return
 
       ctx.clearRect(0, 0, canvas.width, canvas.height)
+      
+      // Draw background
+      ctx.fillStyle = '#111827'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
 
       // Update activation values (simulate activity)
       for (let i = 0; i < activationValues.length; i++) {
@@ -120,7 +124,7 @@ export default function NeuralNetworkViz() {
       })
 
       // Draw layer labels
-      ctx.fillStyle = '#6c757d'
+      ctx.fillStyle = '#d1d5db'
       ctx.font = '12px Inter, sans-serif'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'top'
@@ -146,8 +150,8 @@ export default function NeuralNetworkViz() {
   }, [])
 
   return (
-    <div className="w-full bg-white rounded-xl border border-gray-200 p-6">
-      <h3 className="text-lg font-bold text-gray-900 mb-4">Neural Network Architecture</h3>
+    <div className="w-full bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 p-6">
+      <h3 className="text-lg font-bold text-gray-100 mb-4">Neural Network Architecture</h3>
       <canvas
         ref={canvasRef}
         className="w-full"

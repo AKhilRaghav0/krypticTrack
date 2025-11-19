@@ -60,7 +60,7 @@ class LLMService:
             'peak_hours': [{'hour': int(r[0]), 'count': r[1]} for r in peak_hours] if peak_hours else []
         }
     
-    def chat(self, message: str, context: Optional[Dict] = None) -> str:
+    def chat(self, message: str, intent: Optional[str] = None, context: Optional[Dict] = None, search_results: Optional[List[Dict]] = None) -> str:
         """Chat with the LLM about user behavior."""
         if not self.is_available():
             raise Exception("LLM service is not available. Please start LM Studio and ensure a model is loaded.")
@@ -82,15 +82,73 @@ You are an AI assistant helping analyze user behavior data. Here's the user's co
 - Total actions tracked: {self.user_context.get('total_actions', 0)}
 - Top activities: {json.dumps(self.user_context.get('top_actions', [])[:5], indent=2)}{peak_hours_str}
 
-When asked about productive hours, peak times, or activity patterns, use the data above to provide specific, accurate answers.
-
 """
         
+        # Add search results if provided (from Spotlight queries)
+        search_context = ""
+        if search_results and len(search_results) > 0:
+            from datetime import datetime
+            search_context = "\n\nRelevant data found from user's history:\n"
+            for i, result in enumerate(search_results[:10], 1):  # Top 10 results
+                action_type = result.get('action_type', 'unknown')
+                source = result.get('source', 'unknown')
+                timestamp = result.get('timestamp', 0)
+                context_data = result.get('context', {})
+                
+                # Format timestamp
+                if timestamp:
+                    try:
+                        dt = datetime.fromtimestamp(timestamp)
+                        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except:
+                        time_str = "recently"
+                else:
+                    time_str = "recently"
+                
+                # Extract relevant context info
+                context_info = ""
+                if isinstance(context_data, dict):
+                    if 'command' in context_data:
+                        context_info = f"Command: {context_data['command']}"
+                    elif 'url' in context_data:
+                        context_info = f"URL: {context_data['url']}"
+                    elif 'file_path' in context_data:
+                        context_info = f"File: {context_data['file_path']}"
+                    elif 'app' in context_data:
+                        context_info = f"App: {context_data['app']}"
+                
+                search_context += f"{i}. {action_type.replace('_', ' ').title()} from {source} at {time_str}"
+                if context_info:
+                    search_context += f" - {context_info}"
+                search_context += "\n"
+        
+        intent_prompts = {
+            'timeline': "Focus on chronological ordering. Reference specific timestamps and sequences from the search results. Be precise about when things happened.",
+            'prediction': "Lean toward forecasting the user's likely next steps. Highlight probabilities or confidence if you can infer them from patterns.",
+            'reflection': "Provide analytical, introspective commentary. Connect behavior patterns to motivations, energy levels, or focus states.",
+            'command': "Focus on specific commands, tools, or actions. Reference exact commands, file paths, or applications used.",
+            'general': "Provide clear, specific answers based on the actual data. Reference specific actions, times, and contexts when available."
+        }
+        intent_suffix = intent_prompts.get(intent or 'general', "")
+
         # Build messages array for LM Studio
+        system_prompt = f"""You are an AI assistant for KrypticTrack, a behavior analytics platform. Your job is to help users understand their behavior patterns by analyzing their actual data.
+
+Rules:
+- Use the search results and context data provided to give SPECIFIC, ACCURATE answers
+- Reference exact timestamps, commands, files, or actions when available
+- If asked about "last X", find the most recent matching item from the search results
+- Be concise but informative (2-4 sentences max)
+- Use natural, conversational language
+- If data is not available, say so clearly
+- Don't make up or guess details - only use what's in the provided data
+
+{intent_suffix}"""
+        
         messages = [
             {
                 "role": "system",
-                "content": "You are an AI assistant for KrypticTrack, a behavior analytics platform. Help users understand their behavior patterns in a friendly, insightful way."
+                "content": system_prompt
             }
         ]
         
@@ -99,8 +157,9 @@ When asked about productive hours, peak times, or activity patterns, use the dat
             messages.append({"role": "user", "content": msg['user']})
             messages.append({"role": "assistant", "content": msg['assistant']})
         
-        # Add current message
-        messages.append({"role": "user", "content": f"{context_prompt}{message}"})
+        # Add current message with context
+        full_message = f"{context_prompt}{search_context}\n\nUser question: {message}\n\nAnswer based on the data above:"
+        messages.append({"role": "user", "content": full_message})
         
         try:
             response = requests.post(

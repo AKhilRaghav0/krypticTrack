@@ -2,10 +2,13 @@
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import time
 import json
 from pathlib import Path
 import sys
+import os
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -14,8 +17,10 @@ sys.path.insert(0, str(project_root))
 from database import DatabaseManager
 from database.schema import create_tables
 from utils.helpers import load_config, generate_session_id
+from backend.utils.logger import setup_logging, get_logger
 from backend.api.routes import api_bp
 from backend.api.llm_routes import llm_bp
+from backend.api.work_session_routes import work_session_bp
 from backend.services.data_cleaner import create_cleanup_endpoint
 
 # Frontend build directory (Vite output)
@@ -32,6 +37,23 @@ CORS(app)  # Enable CORS for extensions
 config = load_config()
 db_config = config['database']
 backend_config = config.get('backend', {})
+
+# Setup structured logging
+log_level = backend_config.get('log_level', 'INFO')
+log_file = backend_config.get('log_file', 'logs/backend.log')
+setup_logging(log_level=log_level, log_file=log_file)
+logger = get_logger("app")
+
+# Setup rate limiting
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",  # Use in-memory storage (can switch to Redis in production)
+)
+
+# Store limiter in app config for use in blueprints
+app.config['limiter'] = limiter
 
 # Initialize database
 db = DatabaseManager(
@@ -57,8 +79,11 @@ conn.commit()
 # Register blueprints
 app.register_blueprint(api_bp, url_prefix='/api')
 app.register_blueprint(llm_bp, url_prefix='/api/llm')
+app.register_blueprint(work_session_bp, url_prefix='/api/work-session')
 cleanup_bp = create_cleanup_endpoint()
 app.register_blueprint(cleanup_bp, url_prefix='/api')
+
+# Rate limiting is applied directly above
 
 # Store db in app context for routes
 app.config['db'] = db
@@ -80,12 +105,49 @@ else:
 
 @app.route('/health')
 def health():
-    """Health check endpoint."""
+    """Basic health check endpoint."""
     return jsonify({
         'status': 'healthy',
         'session_id': current_session_id,
         'uptime': time.time() - session_start_time
     })
+
+
+@app.route('/health/ready')
+def health_ready():
+    """Readiness probe - checks if service is ready to accept traffic."""
+    try:
+        # Check database connection
+        db = app.config.get('db')
+        if db:
+            conn = db.connect()
+            conn.execute("SELECT 1")
+        
+        # Check model manager
+        model_manager = app.config.get('model_manager')
+        model_loaded = model_manager.model_loaded if model_manager else False
+        
+        return jsonify({
+            'status': 'ready',
+            'database': 'connected',
+            'model_loaded': model_loaded,
+            'uptime': time.time() - session_start_time
+        }), 200
+    except Exception as e:
+        logger.error("Readiness check failed", error=str(e))
+        return jsonify({
+            'status': 'not_ready',
+            'error': str(e)
+        }), 503
+
+
+@app.route('/health/live')
+def health_live():
+    """Liveness probe - checks if service is alive."""
+    return jsonify({
+        'status': 'alive',
+        'timestamp': time.time()
+    }), 200
 
 
 @app.route('/assets/<path:filename>')

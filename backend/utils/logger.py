@@ -1,93 +1,71 @@
-"""
-Better logging system - no console spam, structured logging
-"""
+"""Structured logging setup for KrypticTrack."""
 
 import logging
-import json
-from datetime import datetime
+import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+import structlog
+from typing import Any, Dict
 
 
-class StructuredLogger:
-    """Structured logger that doesn't spam console."""
+def setup_logging(log_level: str = "INFO", log_file: str = "logs/backend.log") -> None:
+    """
+    Set up structured logging for the application.
     
-    def __init__(self, log_file: Optional[Path] = None):
-        self.log_file = log_file or Path('logs/backend.log')
-        self.log_file.parent.mkdir(exist_ok=True)
-        
-        # Setup logging
-        self.logger = logging.getLogger('kryptictrack')
-        self.logger.setLevel(logging.INFO)
-        
-        # File handler (all logs)
-        file_handler = logging.FileHandler(self.log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(file_formatter)
-        self.logger.addHandler(file_handler)
-        
-        # NO console handler - all logs go to file only
-        # Console stays completely clean
-        
-        # Store recent logs in memory for API access
-        self.recent_logs: List[Dict] = []
-        self.max_recent_logs = 100
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_file: Path to log file
+    """
+    # Ensure log directory exists
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     
-    def log_action(self, level: str, message: str, **kwargs):
-        """Log an action with structured data."""
-        log_entry = {
-            'timestamp': datetime.now().isoformat(),
-            'level': level,
-            'message': message,
-            **kwargs
-        }
-        
-        # Add to recent logs
-        self.recent_logs.append(log_entry)
-        if len(self.recent_logs) > self.max_recent_logs:
-            self.recent_logs.pop(0)
-        
-        # Log to file
-        if level == 'error':
-            self.logger.error(f"{message} | {json.dumps(kwargs)}")
-        elif level == 'warning':
-            self.logger.warning(f"{message} | {json.dumps(kwargs)}")
-        elif level == 'info':
-            self.logger.info(f"{message} | {json.dumps(kwargs)}")
-        else:
-            self.logger.debug(f"{message} | {json.dumps(kwargs)}")
+    # Configure structlog
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.JSONRenderer() if log_file else structlog.dev.ConsoleRenderer(),
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
     
-    def get_recent_logs(self, level: Optional[str] = None, limit: int = 50) -> List[Dict]:
-        """Get recent logs, optionally filtered by level."""
-        logs = self.recent_logs
-        if level:
-            logs = [log for log in logs if log['level'] == level]
-        return logs[-limit:]
+    # Configure standard library logging
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=getattr(logging, log_level.upper()),
+    )
     
-    def get_stats(self) -> Dict:
-        """Get logging statistics."""
-        total = len(self.recent_logs)
-        errors = len([l for l in self.recent_logs if l['level'] == 'error'])
-        warnings = len([l for l in self.recent_logs if l['level'] == 'warning'])
+    # File handler for persistent logs
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    file_handler.setFormatter(file_formatter)
+    
+    # Add file handler to root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+
+
+def get_logger(name: str = "kryptictrack") -> structlog.BoundLogger:
+    """
+    Get a structured logger instance.
+    
+    Args:
+        name: Logger name
         
-        return {
-            'total_logs': total,
-            'errors': errors,
-            'warnings': warnings,
-            'info': total - errors - warnings
-        }
-
-
-# Global logger instance
-_logger_instance = None
-
-def get_logger() -> StructuredLogger:
-    """Get the global logger instance."""
-    global _logger_instance
-    if _logger_instance is None:
-        _logger_instance = StructuredLogger()
-    return _logger_instance
-
+    Returns:
+        Structured logger instance
+    """
+    return structlog.get_logger(name)

@@ -14,10 +14,16 @@
     "@react-three/drei": "^9.114.3",
     "@react-three/fiber": "^8.17.10",
     "chart.js": "^4.5.1",
+    "katex": "^0.16.25",
     "react": "^18.3.1",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^18.3.1",
+    "react-katex": "^3.1.0",
+    "react-markdown": "^9.0.1",
     "react-router-dom": "^6.28.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.0",
+    "remark-math": "^6.0.0",
     "three": "^0.181.1"
   },
   "devDependencies": {

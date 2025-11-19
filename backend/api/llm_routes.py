@@ -3,9 +3,12 @@ LLM API Routes for Chat and Suggestions
 """
 
 from flask import Blueprint, request, jsonify, current_app
+from flask_limiter import Limiter
 from backend.services.llm_service import get_llm_service
 
 llm_bp = Blueprint('llm', __name__)
+
+# Rate limiter will be accessed from app config
 
 
 @llm_bp.route('/chat', methods=['POST'])
@@ -14,6 +17,7 @@ def chat():
     try:
         data = request.get_json()
         message = data.get('message', '')
+        intent = data.get('intent')
         
         if not message:
             return jsonify({'error': 'Message is required'}), 400
@@ -29,6 +33,8 @@ def chat():
         
         # Load user context if available
         db = current_app.config.get('db')
+        search_results = data.get('search_results', [])
+        
         if db:
             try:
                 conn = db.connect()
@@ -40,7 +46,7 @@ def chat():
                     logger.log_action('warning', 'Failed to load user context for LLM', error=str(e))
         
         try:
-            response = llm.chat(message)
+            response = llm.chat(message, intent=intent, search_results=search_results)
             
             # Response should be a valid string at this point (exceptions are raised, not returned)
             if not response or not isinstance(response, str):

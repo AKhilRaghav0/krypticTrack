@@ -1,6 +1,8 @@
 """API routes for KrypticTrack backend."""
 
 from flask import Blueprint, request, jsonify, current_app
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import time
 import json
 import threading
@@ -8,8 +10,11 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
+from backend.utils.cache import cached
 
 api_bp = Blueprint('api', __name__)
+
+# Rate limiter will be accessed from app config
 
 # Training state (in-memory, could be moved to database)
 training_state = {
@@ -144,6 +149,7 @@ def log_action():
 
 
 @api_bp.route('/stats', methods=['GET'])
+@cached(ttl=30)  # Cache for 30 seconds
 def get_stats():
     """Get current session statistics."""
     try:
@@ -316,6 +322,16 @@ def get_predictions():
         # Get prediction with optional LLM explanation
         prediction = model_manager.predict_next_action(recent_actions, use_llm=use_llm, llm_service=llm_service if use_llm else None)
         prediction['available'] = True
+        
+        # Format top_3 for frontend if available
+        if 'top_3' in prediction and prediction['top_3']:
+            # Calculate percentages for top 3
+            top_reward = prediction['top_3'][0]['reward'] if prediction['top_3'] else 1
+            for pred in prediction['top_3']:
+                if top_reward > 0:
+                    pred['percentage'] = (pred['reward'] / top_reward) * 100
+                else:
+                    pred['percentage'] = 0
         prediction['llm_enabled'] = use_llm
         
         return jsonify(prediction), 200
@@ -992,16 +1008,37 @@ def search_actions():
         cursor = conn.cursor()
         
         # Search in action_type, source, and context_json
-        cursor.execute("""
+        # Also search for specific action types when query mentions them
+        query_lower = query.lower()
+        action_type_conditions = []
+        params = [f'%{query}%', f'%{query}%', f'%{query}%']
+        
+        # If query mentions git, also search for git-related action types
+        if 'git' in query_lower:
+            action_type_conditions.append("action_type IN ('git_history_commit', 'git_cli_history')")
+            # Also search for git commands in terminal_command context
+            params.append(f'%git%')
+        
+        # If query mentions bash, terminal, or command, search terminal commands
+        if any(term in query_lower for term in ['bash', 'terminal', 'command', 'shell', 'zsh']):
+            action_type_conditions.append("action_type IN ('terminal_command', 'bash_history_command', 'zsh_history_command', 'python_repl_command')")
+        
+        # Build the WHERE clause
+        where_clause = """
+            LOWER(action_type) LIKE ? OR
+            LOWER(source) LIKE ? OR
+            LOWER(context_json) LIKE ?
+        """
+        if action_type_conditions:
+            where_clause += " OR " + " OR ".join(action_type_conditions)
+        
+        cursor.execute(f"""
             SELECT id, timestamp, source, action_type, context_json
             FROM actions
-            WHERE 
-                LOWER(action_type) LIKE ? OR
-                LOWER(source) LIKE ? OR
-                LOWER(context_json) LIKE ?
+            WHERE {where_clause}
             ORDER BY timestamp DESC
             LIMIT 20
-        """, (f'%{query}%', f'%{query}%', f'%{query}%'))
+        """, tuple(params))
         
         rows = cursor.fetchall()
         results = []
@@ -1020,11 +1057,86 @@ def search_actions():
                 'context': context
             })
         
-        conn.close()
+        # Don't close connection - it's managed by DatabaseManager
         return jsonify({'results': results}), 200
         
     except Exception as e:
         return jsonify({'error': str(e), 'results': []}), 200
+
+
+@api_bp.route('/model/list', methods=['GET'])
+def list_models():
+    """List all available model checkpoints."""
+    try:
+        project_root = Path(__file__).parent.parent.parent
+        checkpoint_dir = project_root / 'models' / 'checkpoints'
+        
+        if not checkpoint_dir.exists():
+            return jsonify({'models': []}), 200
+        
+        models = []
+        model_manager = current_app.config.get('model_manager')
+        current_model_path = model_manager.model_path if model_manager else None
+        
+        for model_path in sorted(checkpoint_dir.glob('reward_model_*.pt'), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = model_path.stat()
+            # Extract date from filename: reward_model_YYYYMMDD_HHMMSS.pt
+            filename = model_path.stem
+            date_str = filename.replace('reward_model_', '')
+            try:
+                # Parse YYYYMMDD_HHMMSS
+                if len(date_str) >= 15:
+                    year = date_str[:4]
+                    month = date_str[4:6]
+                    day = date_str[6:8]
+                    hour = date_str[9:11] if len(date_str) > 9 else '00'
+                    minute = date_str[11:13] if len(date_str) > 11 else '00'
+                    formatted_date = f"{year}-{month}-{day} {hour}:{minute}"
+                else:
+                    formatted_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+            except:
+                formatted_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+            
+            models.append({
+                'path': str(model_path),
+                'name': model_path.name,
+                'size_mb': round(stat.st_size / (1024 * 1024), 2),
+                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'formatted_date': formatted_date,
+                'is_current': str(model_path) == current_model_path
+            })
+        
+        return jsonify({'models': models}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/model/select', methods=['POST'])
+def select_model():
+    """Select and load a specific model."""
+    try:
+        data = request.get_json()
+        model_path = data.get('model_path')
+        
+        if not model_path:
+            return jsonify({'error': 'model_path is required'}), 400
+        
+        model_manager = current_app.config.get('model_manager')
+        if not model_manager:
+            return jsonify({'error': 'Model manager not available'}), 500
+        
+        success = model_manager.load_model(model_path)
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Model loaded successfully',
+                'model_path': model_path,
+                'model_info': model_manager.get_model_info()
+            }), 200
+        else:
+            return jsonify({'error': 'Failed to load model'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @api_bp.route('/model/status', methods=['GET'])
@@ -1072,7 +1184,7 @@ def model_status():
                         conn.commit()
                         # Clear metadata from state to prevent duplicate saves
                         training_state['data_metadata'] = None
-                    conn.close()
+                    # Don't close connection - it's managed by DatabaseManager
                 except Exception as e:
                     # Log error but don't fail the request
                     pass
@@ -1114,8 +1226,48 @@ def model_status():
     # Determine overall status
     if status['status'] == 'idle' and status.get('model_exists'):
         status['status'] = 'trained'
+        # Clear training history/metrics when not actively training
+        if not status.get('started_at'):
+            status['history'] = {'loss': [], 'reward_mean': [], 'reward_std': []}
+            status['metrics'] = {'loss': None, 'reward_mean': None, 'reward_std': None, 'learning_rate': None}
+            status['progress'] = 0
+            status['current_epoch'] = 0
+            status['total_epochs'] = 0
     elif status['status'] == 'idle':
         status['status'] = 'not_trained'
+        # Clear training history/metrics when not trained
+        status['history'] = {'loss': [], 'reward_mean': [], 'reward_std': []}
+        status['metrics'] = {'loss': None, 'reward_mean': None, 'reward_std': None, 'learning_rate': None}
+        status['progress'] = 0
+        status['current_epoch'] = 0
+        status['total_epochs'] = 0
+    
+    # Add action type counts for color coding and total actions
+    if db:
+        try:
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Get total actions count
+            cursor.execute("SELECT COUNT(*) FROM actions")
+            total_actions = cursor.fetchone()[0]
+            status['total_actions'] = total_actions
+            
+            # Get action type counts
+            cursor.execute("""
+                SELECT action_type, COUNT(*) as count
+                FROM actions
+                GROUP BY action_type
+                ORDER BY count DESC
+                LIMIT 20
+            """)
+            rows = cursor.fetchall()
+            action_type_counts = {row[0]: row[1] for row in rows}
+            status['data_sources'] = action_type_counts  # Reusing key name for compatibility
+            # Don't close connection - it's managed by DatabaseManager
+        except Exception as e:
+            # Silent fail
+            pass
     
     return jsonify(status), 200
 

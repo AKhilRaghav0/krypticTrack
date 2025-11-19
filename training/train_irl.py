@@ -14,6 +14,8 @@ import subprocess
 from typing import List, Tuple, Optional, Dict
 from datetime import datetime
 from threading import Thread, Event
+import hashlib
+import ast
 
 # Try to import rich for TUI, fallback to basic print if not available
 try:
@@ -25,10 +27,25 @@ try:
     from rich.layout import Layout
     from rich.text import Text
     from rich import box
+    # Sparkline might not be available in all rich versions
+    try:
+        from rich.sparkline import Sparkline
+        HAS_SPARKLINE = True
+    except ImportError:
+        HAS_SPARKLINE = False
+    # Columns might not be available in all rich versions
+    try:
+        from rich.columns import Columns
+        HAS_COLUMNS = True
+    except ImportError:
+        HAS_COLUMNS = False
     HAS_RICH = True
-except ImportError:
+except ImportError as e:
     HAS_RICH = False
-    print("⚠️  Install 'rich' for beautiful TUI: pip install rich")
+    HAS_SPARKLINE = False
+    HAS_COLUMNS = False
+    print(f"⚠️  Rich not available: {e}")
+    print("   Install with: pip install rich")
     print("   Continuing with basic output...\n")
 
 # Add project root to path
@@ -70,6 +87,11 @@ class TrainingTUI:
         self.completed = False
         self.completion_summary = {}
         self.new_data_summary = {}
+        # Performance metrics
+        self.epoch_times = []  # Track time per epoch for ETA
+        self.last_epoch_time = None
+        self.actions_per_second = 0
+        self.estimated_time_remaining = 0
     
     def update_data_loading(self, current: int, total: int, status: str):
         """Update data loading progress."""
@@ -101,24 +123,53 @@ class TrainingTUI:
     def update_training(self, epoch: int, total_epochs: int, loss: float = None, 
                        reward_mean: float = None, reward_std: float = None):
         """Update training metrics."""
+        current_time = time.time()
+        
+        # Track epoch timing for ETA
+        if epoch > self.current_epoch and self.training_start_time:
+            if self.last_epoch_time is None:
+                # First epoch - initialize
+                self.last_epoch_time = current_time
+            else:
+                epoch_duration = current_time - self.last_epoch_time
+                self.epoch_times.append(epoch_duration)
+                # Keep only last 10 epochs for average
+                if len(self.epoch_times) > 10:
+                    self.epoch_times = self.epoch_times[-10:]
+                
+                # Calculate ETA
+                if len(self.epoch_times) > 0:
+                    avg_epoch_time = sum(self.epoch_times) / len(self.epoch_times)
+                    remaining_epochs = total_epochs - epoch
+                    self.estimated_time_remaining = avg_epoch_time * remaining_epochs
+            
+            self.last_epoch_time = current_time
+        
         self.current_epoch = epoch
         self.total_epochs = total_epochs
         if loss is not None:
             self.current_loss = loss
             self.history_loss.append(loss)
+            # Keep only last 50 points for sparkline
+            if len(self.history_loss) > 50:
+                self.history_loss = self.history_loss[-50:]
         if reward_mean is not None:
             self.current_reward_mean = reward_mean
             self.history_reward_mean.append(reward_mean)
+            if len(self.history_reward_mean) > 50:
+                self.history_reward_mean = self.history_reward_mean[-50:]
         if reward_std is not None:
             self.current_reward_std = reward_std
             self.history_reward_std.append(reward_std)
+            if len(self.history_reward_std) > 50:
+                self.history_reward_std = self.history_reward_std[-50:]
     
     def render(self) -> str:
         """Render the TUI layout."""
         if not HAS_RICH:
             return self._render_basic()
         
-        # Create layout
+        # Create layout - improved with more sections
         layout = Layout()
         layout.split_column(
             Layout(name="header", size=3),
@@ -126,8 +177,12 @@ class TrainingTUI:
             Layout(name="footer", size=3)
         )
         layout["body"].split_row(
-            Layout(name="left", ratio=2),
-            Layout(name="right", ratio=1)
+            Layout(name="left", ratio=3),
+            Layout(name="right", ratio=2)
+        )
+        layout["left"].split_column(
+            Layout(name="metrics", size=12),
+            Layout(name="charts", size=8)
         )
         
         # Header
@@ -138,67 +193,192 @@ class TrainingTUI:
         )
         layout["header"].update(header)
         
-        # Left panel - Training progress
-        left_table = Table(show_header=False, box=None, padding=(0, 1))
+        # Metrics panel - Training progress
+        metrics_table = Table(show_header=False, box=None, padding=(0, 1))
         
         if self.completed:
             # Show completion summary
-            left_table.add_row(Text("✅ COMPLETE!", style="bold green"), "")
-            left_table.add_row("", "")
+            metrics_table.add_row(Text("✅ COMPLETE!", style="bold green"), "")
+            metrics_table.add_row("", "")
             if self.completion_summary:
-                left_table.add_row(Text("Model Path:", style="bold"), self.completion_summary.get('model_path', 'N/A')[:50])
-                left_table.add_row("", "")
-                left_table.add_row(Text("Final Metrics:", style="bold cyan"), "")
+                metrics_table.add_row(Text("Model Path:", style="bold"), self.completion_summary.get('model_path', 'N/A')[:50])
+                metrics_table.add_row("", "")
+                metrics_table.add_row(Text("Final Metrics:", style="bold cyan"), "")
                 loss = self.completion_summary.get('final_loss')
                 if loss is not None:
                     loss_color = "green" if loss < 0.1 else "yellow" if loss < 0.5 else "red"
-                    left_table.add_row("  Loss:", Text(f"{loss:.6f}", style=loss_color))
+                    metrics_table.add_row("  Loss:", Text(f"{loss:.6f}", style=loss_color))
                 if self.completion_summary.get('final_reward_mean') is not None:
-                    left_table.add_row("  Reward μ:", f"{self.completion_summary['final_reward_mean']:.4f}")
+                    metrics_table.add_row("  Reward μ:", f"{self.completion_summary['final_reward_mean']:.4f}")
                 if self.completion_summary.get('final_reward_std') is not None:
-                    left_table.add_row("  Reward σ:", f"{self.completion_summary['final_reward_std']:.4f}")
-                left_table.add_row("", "")
-                left_table.add_row(Text("Training Info:", style="bold cyan"), "")
-                left_table.add_row("  Epochs:", str(self.completion_summary.get('num_epochs', 'N/A')))
-                left_table.add_row("  Actions:", f"{self.completion_summary.get('total_actions', 0):,}")
-                left_table.add_row("  Data Range:", self.completion_summary.get('data_range', 'N/A'))
+                    metrics_table.add_row("  Reward σ:", f"{self.completion_summary['final_reward_std']:.4f}")
+                metrics_table.add_row("", "")
+                metrics_table.add_row(Text("Training Info:", style="bold cyan"), "")
+                metrics_table.add_row("  Epochs:", str(self.completion_summary.get('num_epochs', 'N/A')))
+                metrics_table.add_row("  Actions:", f"{self.completion_summary.get('total_actions', 0):,}")
+                metrics_table.add_row("  Data Range:", self.completion_summary.get('data_range', 'N/A'))
         else:
-            # Normal training progress
-            left_table.add_row("Status:", Text(self.training_status, style="bold green"))
-            left_table.add_row("Epoch:", f"{self.current_epoch}/{self.total_epochs}")
+            # Normal training progress with enhanced metrics
+            metrics_table.add_row(Text("Status:", style="bold"), Text(self.training_status, style="bold green"))
+            metrics_table.add_row(Text("Epoch:", style="bold"), f"[cyan]{self.current_epoch}[/cyan]/[dim]{self.total_epochs}[/dim]")
             
             if self.current_loss is not None:
                 loss_color = "green" if self.current_loss < 0.1 else "yellow" if self.current_loss < 0.5 else "red"
-                left_table.add_row("Loss:", Text(f"{self.current_loss:.6f}", style=loss_color))
+                # Show loss change if available
+                loss_change = ""
+                if len(self.history_loss) > 1:
+                    change = self.history_loss[-1] - self.history_loss[-2]
+                    change_str = f"{change:+.6f}" if abs(change) > 0.000001 else "±0.000000"
+                    change_color = "green" if change < 0 else "red" if change > 0 else "dim"
+                    loss_change = f" [{change_color}]{change_str}[/{change_color}]"
+                metrics_table.add_row(Text("Loss:", style="bold"), Text(f"{self.current_loss:.6f}", style=loss_color) + loss_change)
             
             if self.current_reward_mean is not None:
-                left_table.add_row("Reward μ:", f"{self.current_reward_mean:.4f}")
+                reward_change = ""
+                if len(self.history_reward_mean) > 1:
+                    change = self.history_reward_mean[-1] - self.history_reward_mean[-2]
+                    change_str = f"{change:+.4f}" if abs(change) > 0.0001 else "±0.0000"
+                    change_color = "green" if change > 0 else "red" if change < 0 else "dim"
+                    reward_change = f" [{change_color}]{change_str}[/{change_color}]"
+                metrics_table.add_row(Text("Reward μ:", style="bold"), f"{self.current_reward_mean:.4f}" + reward_change)
             
             if self.current_reward_std is not None:
-                left_table.add_row("Reward σ:", f"{self.current_reward_std:.4f}")
+                metrics_table.add_row(Text("Reward σ:", style="bold"), f"{self.current_reward_std:.4f}")
             
+            metrics_table.add_row("", "")  # Spacer
+            
+            # Time metrics
             if self.training_start_time:
                 elapsed = time.time() - self.training_start_time
-                left_table.add_row("Elapsed:", f"{elapsed:.1f}s")
+                metrics_table.add_row(Text("Elapsed:", style="bold"), f"[cyan]{elapsed:.1f}s[/cyan]")
+                
+                # ETA
+                if self.estimated_time_remaining > 0:
+                    eta_min = int(self.estimated_time_remaining // 60)
+                    eta_sec = int(self.estimated_time_remaining % 60)
+                    if eta_min > 0:
+                        eta_str = f"{eta_min}m {eta_sec}s"
+                    else:
+                        eta_str = f"{eta_sec}s"
+                    metrics_table.add_row(Text("ETA:", style="bold"), f"[yellow]{eta_str}[/yellow]")
+                
+                # Speed (epochs per second)
+                if len(self.epoch_times) > 0:
+                    avg_epoch_time = sum(self.epoch_times) / len(self.epoch_times)
+                    if avg_epoch_time > 0:
+                        epochs_per_sec = 1.0 / avg_epoch_time
+                        metrics_table.add_row(Text("Speed:", style="bold"), f"[green]{epochs_per_sec:.2f}[/green] epochs/s")
             
-            # Progress bar
+            metrics_table.add_row("", "")  # Spacer
+            
+            # Progress bar with percentage
             if self.total_epochs > 0:
                 progress_pct = min((self.current_epoch / self.total_epochs) * 100, 100.0)
-                progress_bar = "█" * int(progress_pct / 2) + "░" * (50 - int(progress_pct / 2))
-                left_table.add_row("Progress:", f"[cyan]{progress_bar}[/cyan] {progress_pct:.1f}%")
+                filled = int(progress_pct / 2)
+                progress_bar = "[green]" + "█" * filled + "[/green]" + "[dim]" + "░" * (50 - filled) + "[/dim]"
+                metrics_table.add_row(Text("Progress:", style="bold"), f"{progress_bar} [cyan]{progress_pct:.1f}%[/cyan]")
         
-        left_panel = Panel(left_table, title="Training Metrics", border_style="blue", box=box.ROUNDED)
-        layout["left"].update(left_panel)
+        metrics_panel = Panel(metrics_table, title="📊 Training Metrics", border_style="blue", box=box.ROUNDED)
+        layout["metrics"].update(metrics_panel)
         
-        # Right panel - Data details
+        # Charts panel - Sparklines for loss and reward
+        charts_table = Table(show_header=False, box=None, padding=(0, 1))
+        
+        if not self.completed and len(self.history_loss) > 1:
+            # Loss sparkline
+            if HAS_SPARKLINE:
+                try:
+                    loss_spark = Sparkline(self.history_loss[-30:], style="red")
+                    loss_text = Text("Loss: ", style="bold red")
+                    charts_table.add_row(loss_text, loss_spark)
+                except:
+                    # Fallback if sparkline fails
+                    loss_min = min(self.history_loss)
+                    loss_max = max(self.history_loss)
+                    loss_range = loss_max - loss_min if loss_max > loss_min else 1
+                    loss_chart = "".join(["▁" if (v - loss_min) / loss_range < 0.125 else
+                                         "▂" if (v - loss_min) / loss_range < 0.25 else
+                                         "▃" if (v - loss_min) / loss_range < 0.375 else
+                                         "▄" if (v - loss_min) / loss_range < 0.5 else
+                                         "▅" if (v - loss_min) / loss_range < 0.625 else
+                                         "▆" if (v - loss_min) / loss_range < 0.75 else
+                                         "▇" if (v - loss_min) / loss_range < 0.875 else "█"
+                                         for v in self.history_loss[-30:]])
+                    charts_table.add_row(Text("Loss: ", style="bold red"), Text(loss_chart, style="red"))
+            else:
+                # Use ASCII chart fallback
+                loss_min = min(self.history_loss)
+                loss_max = max(self.history_loss)
+                loss_range = loss_max - loss_min if loss_max > loss_min else 1
+                loss_chart = "".join(["▁" if (v - loss_min) / loss_range < 0.125 else
+                                     "▂" if (v - loss_min) / loss_range < 0.25 else
+                                     "▃" if (v - loss_min) / loss_range < 0.375 else
+                                     "▄" if (v - loss_min) / loss_range < 0.5 else
+                                     "▅" if (v - loss_min) / loss_range < 0.625 else
+                                     "▆" if (v - loss_min) / loss_range < 0.75 else
+                                     "▇" if (v - loss_min) / loss_range < 0.875 else "█"
+                                     for v in self.history_loss[-30:]])
+                charts_table.add_row(Text("Loss: ", style="bold red"), Text(loss_chart, style="red"))
+        
+        if not self.completed and len(self.history_reward_mean) > 1:
+            # Reward sparkline
+            if HAS_SPARKLINE:
+                try:
+                    reward_spark = Sparkline(self.history_reward_mean[-30:], style="green")
+                    reward_text = Text("Reward: ", style="bold green")
+                    charts_table.add_row(reward_text, reward_spark)
+                except:
+                    # Fallback
+                    reward_min = min(self.history_reward_mean)
+                    reward_max = max(self.history_reward_mean)
+                    reward_range = reward_max - reward_min if reward_max > reward_min else 1
+                    reward_chart = "".join(["▁" if (v - reward_min) / reward_range < 0.125 else
+                                            "▂" if (v - reward_min) / reward_range < 0.25 else
+                                            "▃" if (v - reward_min) / reward_range < 0.375 else
+                                            "▄" if (v - reward_min) / reward_range < 0.5 else
+                                            "▅" if (v - reward_min) / reward_range < 0.625 else
+                                            "▆" if (v - reward_min) / reward_range < 0.75 else
+                                            "▇" if (v - reward_min) / reward_range < 0.875 else "█"
+                                            for v in self.history_reward_mean[-30:]])
+                    charts_table.add_row(Text("Reward: ", style="bold green"), Text(reward_chart, style="green"))
+            else:
+                # Use ASCII chart fallback
+                reward_min = min(self.history_reward_mean)
+                reward_max = max(self.history_reward_mean)
+                reward_range = reward_max - reward_min if reward_max > reward_min else 1
+                reward_chart = "".join(["▁" if (v - reward_min) / reward_range < 0.125 else
+                                        "▂" if (v - reward_min) / reward_range < 0.25 else
+                                        "▃" if (v - reward_min) / reward_range < 0.375 else
+                                        "▄" if (v - reward_min) / reward_range < 0.5 else
+                                        "▅" if (v - reward_min) / reward_range < 0.625 else
+                                        "▆" if (v - reward_min) / reward_range < 0.75 else
+                                        "▇" if (v - reward_min) / reward_range < 0.875 else "█"
+                                        for v in self.history_reward_mean[-30:]])
+                charts_table.add_row(Text("Reward: ", style="bold green"), Text(reward_chart, style="green"))
+        
+        if len(charts_table.rows) == 0:
+            charts_table.add_row(Text("Charts will appear as training progresses...", style="dim"), "")
+        
+        charts_panel = Panel(charts_table, title="📈 Trends", border_style="magenta", box=box.ROUNDED)
+        layout["charts"].update(charts_panel)
+        
+        # Right panel - Data details (enhanced)
         right_table = Table(show_header=False, box=None, padding=(0, 1))
-        right_table.add_row("Status:", Text(self.data_loading_status, style="bold"))
+        right_table.add_row(Text("Status:", style="bold"), Text(self.data_loading_status, style="bold cyan"))
         
         if self.data_loading_total > 0:
             loading_pct = (self.data_loading_progress / self.data_loading_total) * 100
-            loading_bar = "█" * int(loading_pct / 2) + "░" * (50 - int(loading_pct / 2))
-            right_table.add_row("Progress:", f"[green]{loading_bar}[/green] {loading_pct:.1f}%")
-            right_table.add_row("Actions:", f"{self.data_loading_progress:,}/{self.data_loading_total:,}")
+            filled = int(loading_pct / 2)
+            loading_bar = "[green]" + "█" * filled + "[/green]" + "[dim]" + "░" * (50 - filled) + "[/dim]"
+            right_table.add_row(Text("Progress:", style="bold"), f"{loading_bar} [cyan]{loading_pct:.1f}%[/cyan]")
+            right_table.add_row(Text("Actions:", style="bold"), f"[green]{self.data_loading_progress:,}[/green]/[dim]{self.data_loading_total:,}[/dim]")
+            
+            # Calculate loading speed
+            if self.training_start_time and self.data_loading_progress > 0:
+                elapsed = time.time() - self.training_start_time
+                if elapsed > 0:
+                    actions_per_sec = self.data_loading_progress / elapsed
+                    right_table.add_row(Text("Speed:", style="bold"), f"[yellow]{actions_per_sec:.1f}[/yellow] actions/s")
         
         if self.total_actions_in_db > 0:
             right_table.add_row("", "")  # Spacer
@@ -207,15 +387,26 @@ class TrainingTUI:
         # Data sources breakdown
         if self.data_sources:
             right_table.add_row("", "")  # Spacer
-            right_table.add_row(Text("Sources:", style="bold cyan"), "")
-            for source, count in sorted(self.data_sources.items(), key=lambda x: x[1], reverse=True)[:5]:
-                right_table.add_row(f"  • {source}:", f"{count:,}")
+            right_table.add_row(Text("Data Sources:", style="bold cyan"), "")
+            for source, count in sorted(self.data_sources.items(), key=lambda x: x[1], reverse=True)[:8]:
+                source_display = {
+                    'system': '🖥️  System',
+                    'vscode': '💻 VS Code',
+                    'chrome': '🌐 Chrome',
+                    'zsh': '🐚 Zsh',
+                    'bash': '🐚 Bash',
+                    'git': '📦 Git',
+                    'npm': '📦 npm',
+                    'pip': '🐍 pip',
+                    'python': '🐍 Python REPL'
+                }.get(source.lower(), source)
+                right_table.add_row(f"  {source_display}:", f"{count:,}")
         
         # Action types breakdown
         if self.data_action_types:
             right_table.add_row("", "")  # Spacer
             right_table.add_row(Text("Action Types:", style="bold cyan"), "")
-            for action_type, count in sorted(self.data_action_types.items(), key=lambda x: x[1], reverse=True)[:5]:
+            for action_type, count in sorted(self.data_action_types.items(), key=lambda x: x[1], reverse=True)[:8]:
                 display_name = action_type.replace('_', ' ').title()[:20]
                 right_table.add_row(f"  • {display_name}:", f"{count:,}")
         
@@ -251,12 +442,19 @@ class TrainingTUI:
                     display_name = action_type.replace('_', ' ').title()[:18]
                     right_table.add_row(f"    • {display_name}:", f"{count:,}")
         
-        right_panel = Panel(right_table, title="Data Details", border_style="green", box=box.ROUNDED)
+        right_panel = Panel(right_table, title="📦 Data Details", border_style="green", box=box.ROUNDED)
         layout["right"].update(right_panel)
         
-        # Footer
-        footer_text = Text("Press Ctrl+C to stop training", style="dim")
-        footer = Panel(footer_text, box=box.ROUNDED, border_style="dim")
+        # Enhanced Footer with more info
+        footer_table = Table(show_header=False, box=None, padding=(0, 1))
+        footer_table.add_row(Text("Press Ctrl+C to stop training", style="dim"))
+        if self.training_start_time and not self.completed:
+            elapsed = time.time() - self.training_start_time
+            footer_table.add_row(Text(f"Running for {elapsed:.0f}s", style="dim"))
+        if self.total_actions_in_db > 0:
+            footer_table.add_row(Text(f"Database: {self.total_actions_in_db:,} actions", style="dim"))
+        
+        footer = Panel(footer_table, box=box.ROUNDED, border_style="dim")
         layout["footer"].update(footer)
         
         return layout
@@ -437,14 +635,324 @@ def load_shell_history_to_db(db_path: str, tui: Optional[TrainingTUI] = None) ->
                                 tui.add_recent_action('terminal_command', 'bash', line[:50])
         except Exception as e:
             pass
+
+    # Load extended developer histories
+    if tui:
+        tui.update_data_loading(actions_added, actions_added, "Loading git history...")
+    git_actions = _load_git_history_from_workspace(cursor, home, tui)
+    actions_added += git_actions
+    
+    if tui:
+        tui.update_data_loading(actions_added, actions_added, "Loading npm history...")
+    npm_actions = _load_npm_history_from_logs(cursor, home, tui)
+    actions_added += npm_actions
+    
+    if tui:
+        tui.update_data_loading(actions_added, actions_added, "Loading pip history...")
+    pip_actions = _load_pip_history_from_logs(cursor, home, tui)
+    actions_added += pip_actions
+    
+    if tui:
+        tui.update_data_loading(actions_added, actions_added, "Loading Python REPL history...")
+    python_actions = _load_python_repl_history(cursor, home, tui)
+    actions_added += python_actions
     
     conn.commit()
     conn.close()
     
     if tui:
-        tui.update_data_loading(actions_added, actions_added, f"Loaded {actions_added} shell commands")
+        summary_parts = []
+        if actions_added > 0:
+            summary_parts.append(f"Total: {actions_added}")
+        if git_actions > 0:
+            summary_parts.append(f"Git: {git_actions}")
+        if npm_actions > 0:
+            summary_parts.append(f"npm: {npm_actions}")
+        if pip_actions > 0:
+            summary_parts.append(f"pip: {pip_actions}")
+        if python_actions > 0:
+            summary_parts.append(f"Python: {python_actions}")
+        
+        summary = " | ".join(summary_parts) if summary_parts else "No new history found"
+        tui.update_data_loading(actions_added, actions_added, f"✅ {summary}")
     
     return actions_added
+
+
+def _discover_git_repos(home: Path, max_repos: int = 20) -> List[Path]:
+    """Best-effort discovery of git repositories for history ingestion."""
+    search_roots = [
+        home / 'Projects',
+        home / 'projects',
+        home / 'Code',
+        home / 'code',
+        home / 'workspace',
+        home / 'Workspace',
+        home / 'dev',
+        home / 'Development',
+        Path.cwd()
+    ]
+    repos = []
+    seen = set()
+    
+    for root in search_roots:
+        if not root.exists() or str(root) in seen:
+            continue
+        seen.add(str(root))
+        try:
+            for git_dir in root.rglob('.git'):
+                repo_path = git_dir.parent
+                repo_key = str(repo_path)
+                if repo_key in seen:
+                    continue
+                repos.append(repo_path)
+                seen.add(repo_key)
+                if len(repos) >= max_repos:
+                    return repos
+        except Exception:
+            continue
+    
+    return repos
+
+
+def _load_git_history_from_workspace(cursor, home: Path, tui: Optional[TrainingTUI] = None) -> int:
+    """Load git commit history as contextual actions."""
+    added = 0
+    repos = _discover_git_repos(home)
+    if tui and repos:
+        tui.update_data_loading(0, len(repos), f"Scanning {len(repos)} git repos for history...")
+    
+    for idx, repo in enumerate(repos):
+        try:
+            result = subprocess.run(
+                ['git', 'log', '-n', '50', '--pretty=format:%ct|%H|%an|%s'],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                cwd=repo
+            )
+            if result.returncode != 0:
+                continue
+            
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            for line in lines:
+                parts = line.split('|', 3)
+                if len(parts) < 4:
+                    continue
+                timestamp_str, commit_hash, author, message = parts
+                try:
+                    timestamp = int(timestamp_str.strip())
+                except:
+                    timestamp = int(time.time())
+                
+                cursor.execute("""
+                    SELECT COUNT(*) FROM actions
+                    WHERE action_type = 'git_history_commit'
+                    AND context_json LIKE ?
+                """, (f'%{commit_hash}%',))
+                
+                if cursor.fetchone()[0]:
+                    continue
+                
+                context = {
+                    'repo_path': str(repo),
+                    'commit': commit_hash,
+                    'author': author,
+                    'message': message[:300]
+                }
+                
+                cursor.execute("""
+                    INSERT INTO actions (timestamp, source, action_type, context_json, session_id)
+                    VALUES (?, 'system', 'git_history_commit', ?, 'dev_history_import')
+                """, (timestamp, json.dumps(context)))
+                added += 1
+                
+                if tui:
+                    tui.add_recent_action('git_history_commit', repo.name, message[:40])
+        except Exception:
+            continue
+        finally:
+            if tui:
+                tui.update_data_loading(idx + 1, len(repos), f"Git history from {repo.name}")
+    
+    return added
+
+
+def _parse_npm_log_command(log_text: str) -> Optional[str]:
+    """Extract npm command from a debug log."""
+    for line in log_text.splitlines():
+        if 'verbose cli [' in line:
+            try:
+                start = line.index('[')
+                end = line.rindex(']') + 1
+                cli_array = ast.literal_eval(line[start:end])
+                if len(cli_array) >= 3:
+                    return f"npm {' '.join(cli_array[2:])}".strip()
+            except Exception:
+                continue
+        if line.strip().startswith('argv "'):
+            matches = re.findall(r'"([^"]+)"', line)
+            if len(matches) >= 3:
+                return 'npm ' + ' '.join(matches[2:])
+    return None
+
+
+def _load_npm_history_from_logs(cursor, home: Path, tui: Optional[TrainingTUI] = None) -> int:
+    """Load npm debug log history."""
+    logs_dir = home / '.npm/_logs'
+    if not logs_dir.exists():
+        return 0
+    
+    added = 0
+    log_files = sorted(logs_dir.glob('*-debug.log'), key=lambda p: p.stat().st_mtime)[-40:]
+    
+    for log_file in log_files:
+        try:
+            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            command_line = _parse_npm_log_command(content)
+            if not command_line:
+                continue
+            
+            command_hash = hashlib.md5(command_line.encode()).hexdigest()[:12]
+            cursor.execute("""
+                SELECT COUNT(*) FROM actions
+                WHERE action_type = 'npm_history_command'
+                AND context_json LIKE ?
+            """, (f'%{command_hash}%',))
+            
+            if cursor.fetchone()[0]:
+                continue
+            
+            context = {
+                'command': command_line,
+                'command_hash': command_hash,
+                'log_file': str(log_file)
+            }
+            
+            timestamp = log_file.stat().st_mtime
+            cursor.execute("""
+                INSERT INTO actions (timestamp, source, action_type, context_json, session_id)
+                VALUES (?, 'system', 'npm_history_command', ?, 'dev_history_import')
+            """, (timestamp, json.dumps(context)))
+            added += 1
+            
+            if tui:
+                tui.add_recent_action('npm_history_command', 'npm', command_line[:50])
+        except Exception:
+            continue
+    
+    return added
+
+
+def _load_pip_history_from_logs(cursor, home: Path, tui: Optional[TrainingTUI] = None) -> int:
+    """Load pip debug log history."""
+    candidates = [
+        home / '.cache/pip/pip.log',
+        home / '.cache/pip/log/debug.log',
+        home / '.pip/pip.log'
+    ]
+    added = 0
+    
+    for log_file in candidates:
+        if not log_file.exists():
+            continue
+        
+        try:
+            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()[-2000:]
+        except Exception:
+            continue
+        
+        for line in lines:
+            if 'Running command' not in line:
+                continue
+            
+            command = line.split('Running command', 1)[1].strip()
+            if not command:
+                continue
+            
+            cmd_hash = hashlib.md5(command.encode()).hexdigest()[:12]
+            cursor.execute("""
+                SELECT COUNT(*) FROM actions
+                WHERE action_type = 'pip_history_command'
+                AND context_json LIKE ?
+            """, (f'%{cmd_hash}%',))
+            
+            if cursor.fetchone()[0]:
+                continue
+            
+            timestamp = log_file.stat().st_mtime
+            match = re.match(r'(\d{4}-\d{2}-\d{2}T[\d:.+-]+)', line)
+            if match:
+                try:
+                    timestamp = datetime.fromisoformat(match.group(1)).timestamp()
+                except Exception:
+                    timestamp = log_file.stat().st_mtime
+            
+            context = {
+                'command': command,
+                'command_hash': cmd_hash,
+                'log_file': str(log_file)
+            }
+            
+            cursor.execute("""
+                INSERT INTO actions (timestamp, source, action_type, context_json, session_id)
+                VALUES (?, 'system', 'pip_history_command', ?, 'dev_history_import')
+            """, (timestamp, json.dumps(context)))
+            added += 1
+            
+            if tui:
+                tui.add_recent_action('pip_history_command', 'pip', command[:50])
+    
+    return added
+
+
+def _load_python_repl_history(cursor, home: Path, tui: Optional[TrainingTUI] = None) -> int:
+    """Load Python REPL commands from ~/.python_history."""
+    history_file = home / '.python_history'
+    if not history_file.exists():
+        return 0
+    
+    added = 0
+    try:
+        with open(history_file, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()[-5000:]
+    except Exception:
+        return 0
+    
+    for line in lines:
+        command = line.strip()
+        if not command:
+            continue
+        
+        cmd_hash = hashlib.md5(command.encode()).hexdigest()[:12]
+        cursor.execute("""
+            SELECT COUNT(*) FROM actions
+            WHERE action_type = 'python_repl_command'
+            AND context_json LIKE ?
+        """, (f'%{cmd_hash}%',))
+        
+        if cursor.fetchone()[0]:
+            continue
+        
+        context = {
+            'code': command[:500],
+            'command_hash': cmd_hash,
+            'source_file': str(history_file)
+        }
+        
+        cursor.execute("""
+            INSERT INTO actions (timestamp, source, action_type, context_json, session_id)
+            VALUES (?, 'system', 'python_repl_command', ?, 'dev_history_import')
+        """, (time.time(), json.dumps(context)))
+        added += 1
+        
+        if tui:
+            tui.add_recent_action('python_repl_command', 'python', command[:50])
+    
+    return added
 
 
 def load_trajectories_from_db(db_path: str, min_actions: int = 100, 
@@ -538,7 +1046,10 @@ def load_trajectories_from_db(db_path: str, min_actions: int = 100,
     }
     
     if tui:
-        tui.update_data_loading(0, total_actions, f"Found {total_actions:,} actions")
+        if last_training_timestamp:
+            tui.update_data_loading(0, total_actions, f"Found {total_actions:,} NEW actions (incremental training)")
+        else:
+            tui.update_data_loading(0, total_actions, f"Found {total_actions:,} actions (full training)")
         tui.set_total_actions(total_actions)
         # Update TUI with data breakdown
         tui.data_sources = source_counts
@@ -659,13 +1170,48 @@ def train_model(
     if tui:
         tui.training_status = "Training..."
     
-    # Train with callback support
+    # Train with callback support, early stopping, and validation
+    # For large datasets (50k+ actions), use validation and early stopping
+    # For smaller datasets, train longer without validation
+    total_actions = len(trajectories) if trajectories else 0
+    if total_actions > 0:
+        # Estimate total state-action pairs (roughly 1 per trajectory entry)
+        estimated_pairs = sum(len(traj) for traj in trajectories)
+    else:
+        estimated_pairs = 0
+    
+    # Adaptive training parameters based on dataset size
+    if estimated_pairs > 50000:
+        # Large dataset: use validation and early stopping
+        validation_split = 0.1
+        early_stopping_patience = 15  # More patience for large datasets
+        recommended_epochs = min(num_epochs, 100)  # Cap at 100 for large datasets
+        if tui:
+            tui.console.print(f"[yellow]📊 Large dataset detected ({estimated_pairs:,} pairs)[/yellow]")
+            tui.console.print(f"[dim]   Using validation split (10%) and early stopping (patience: {early_stopping_patience})[/dim]")
+    elif estimated_pairs > 10000:
+        # Medium dataset: moderate validation
+        validation_split = 0.15
+        early_stopping_patience = 12
+        recommended_epochs = num_epochs
+    else:
+        # Small dataset: no validation, train longer
+        validation_split = 0.0
+        early_stopping_patience = 20
+        recommended_epochs = max(num_epochs, 50)  # At least 50 epochs for small datasets
+        if tui:
+            tui.console.print(f"[yellow]📊 Small dataset ({estimated_pairs:,} pairs)[/yellow]")
+            tui.console.print(f"[dim]   Training without validation, will use early stopping if loss plateaus[/dim]")
+    
     history = irl.train(
         expert_trajectories=trajectories,
-        num_epochs=num_epochs,
+        num_epochs=recommended_epochs,
         batch_size=batch_size,
         verbose=not bool(tui),  # Verbose only if no TUI
-        callback=callback  # Pass callback for TUI updates
+        callback=callback,  # Pass callback for TUI updates
+        early_stopping_patience=early_stopping_patience,
+        min_loss_delta=1e-6,
+        validation_split=validation_split
     )
     
     # Save model
@@ -750,65 +1296,106 @@ if __name__ == '__main__':
     
     # Load shell history if backend hasn't been running
     if tui:
-        tui.update_data_loading(0, 1, "Checking for shell history...")
+        tui.update_data_loading(0, 1, "📚 Scanning for shell history files...")
+        tui.console.print("\n[bold cyan]📚 Loading Historical Data[/bold cyan]")
+        tui.console.print("[dim]This includes: zsh, bash, git, npm, pip, Python REPL history[/dim]\n")
     
     shell_actions = load_shell_history_to_db(str(db_path), tui)
-    if shell_actions > 0 and tui:
-        tui.console.print(f"[green]✅ Loaded {shell_actions} shell commands from history[/green]")
-    elif shell_actions > 0:
-        print(f"✅ Loaded {shell_actions} shell commands from history")
+    if shell_actions > 0:
+        if tui:
+            tui.console.print(f"[green]✅ Loaded {shell_actions:,} historical commands[/green]\n")
+        else:
+            print(f"✅ Loaded {shell_actions:,} shell commands from history")
+    elif tui:
+        tui.console.print("[yellow]⚠️  No new shell history found (may already be in DB)[/yellow]\n")
     
     # Training config - check environment variables first (from API), then config file
     import os
+    
+    # Load data first to make smart recommendations
+    db_manager = DatabaseManager(db_path)
+    conn = db_manager.connect()
+    cursor = conn.cursor()
+    
+    # Get dataset size for smart defaults
+    cursor.execute("SELECT COUNT(*) FROM actions WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')")
+    total_actions = cursor.fetchone()[0]
+    conn.close()
+    
+    # Smart defaults based on dataset size
+    if total_actions > 50000:
+        recommended_lr = 0.0005  # Lower LR for large datasets (more stable)
+        recommended_batch = 128  # Larger batch for large datasets
+        recommended_epochs = 80
+        lr_explanation = "Large dataset → lower LR for stability"
+    elif total_actions > 20000:
+        recommended_lr = 0.001  # Standard LR
+        recommended_batch = 64
+        recommended_epochs = 60
+        lr_explanation = "Medium dataset → standard LR"
+    else:
+        recommended_lr = 0.002  # Higher LR for small datasets (faster learning)
+        recommended_batch = 32
+        recommended_epochs = 50
+        lr_explanation = "Small dataset → higher LR for faster learning"
     
     # Ask user for training parameters if not set via environment
     if not os.environ.get('TRAINING_EPOCHS'):
         if tui and HAS_RICH:
             tui.console.print("\n[bold cyan]Training Configuration[/bold cyan]")
-            try:
-                epochs_input = tui.console.input("[cyan]Number of epochs[/cyan] (default: 50): ").strip()
-                num_epochs = int(epochs_input) if epochs_input else 50
-            except ValueError:
-                num_epochs = 50
-                tui.console.print("[yellow]Invalid input, using default: 50[/yellow]")
+            tui.console.print(f"[dim]Dataset: {total_actions:,} actions → {lr_explanation}[/dim]\n")
             
             try:
-                batch_input = tui.console.input("[cyan]Batch size[/cyan] (default: 64): ").strip()
-                batch_size = int(batch_input) if batch_input else 64
+                epochs_input = tui.console.input(f"[cyan]Number of epochs[/cyan] (recommended: {recommended_epochs}, default: 50): ").strip()
+                num_epochs = int(epochs_input) if epochs_input else recommended_epochs
             except ValueError:
-                batch_size = 64
-                tui.console.print("[yellow]Invalid input, using default: 64[/yellow]")
+                num_epochs = recommended_epochs
+                tui.console.print(f"[yellow]Invalid input, using recommended: {recommended_epochs}[/yellow]")
             
             try:
-                lr_input = tui.console.input("[cyan]Learning rate[/cyan] (default: 0.001): ").strip()
-                learning_rate = float(lr_input) if lr_input else 0.001
+                batch_input = tui.console.input(f"[cyan]Batch size[/cyan] (recommended: {recommended_batch}, default: 64): ").strip()
+                batch_size = int(batch_input) if batch_input else recommended_batch
             except ValueError:
-                learning_rate = 0.001
-                tui.console.print("[yellow]Invalid input, using default: 0.001[/yellow]")
+                batch_size = recommended_batch
+                tui.console.print(f"[yellow]Invalid input, using recommended: {recommended_batch}[/yellow]")
+            
+            try:
+                lr_input = tui.console.input(f"[cyan]Learning rate[/cyan] (recommended: {recommended_lr}, default: 0.001) [dim]Press Enter for smart default[/dim]: ").strip()
+                learning_rate = float(lr_input) if lr_input else recommended_lr
+            except ValueError:
+                learning_rate = recommended_lr
+                tui.console.print(f"[yellow]Invalid input, using recommended: {recommended_lr}[/yellow]")
+            
+            if not lr_input:
+                tui.console.print(f"[green]✓ Using smart default: {recommended_lr} (based on {total_actions:,} actions)[/green]")
         else:
             # Basic input without rich
+            print(f"\n📊 Dataset: {total_actions:,} actions")
+            print(f"💡 Recommended: LR={recommended_lr}, Batch={recommended_batch}, Epochs={recommended_epochs}")
             try:
-                epochs_input = input("\nNumber of epochs (default: 50): ").strip()
-                num_epochs = int(epochs_input) if epochs_input else 50
+                epochs_input = input(f"\nNumber of epochs (recommended: {recommended_epochs}, default: 50): ").strip()
+                num_epochs = int(epochs_input) if epochs_input else recommended_epochs
             except (ValueError, EOFError):
-                num_epochs = 50
+                num_epochs = recommended_epochs
             
             try:
-                batch_input = input("Batch size (default: 64): ").strip()
-                batch_size = int(batch_input) if batch_input else 64
+                batch_input = input(f"Batch size (recommended: {recommended_batch}, default: 64): ").strip()
+                batch_size = int(batch_input) if batch_input else recommended_batch
             except (ValueError, EOFError):
-                batch_size = 64
+                batch_size = recommended_batch
             
             try:
-                lr_input = input("Learning rate (default: 0.001): ").strip()
-                learning_rate = float(lr_input) if lr_input else 0.001
+                lr_input = input(f"Learning rate (recommended: {recommended_lr}, default: 0.001) [Press Enter for smart default]: ").strip()
+                learning_rate = float(lr_input) if lr_input else recommended_lr
+                if not lr_input:
+                    print(f"✓ Using smart default: {recommended_lr}")
             except (ValueError, EOFError):
-                learning_rate = 0.001
+                learning_rate = recommended_lr
     else:
         # Use environment variables or config defaults
-        num_epochs = int(os.environ.get('TRAINING_EPOCHS', 0)) or config.get('training', {}).get('num_epochs', 50)
-        learning_rate = float(os.environ.get('TRAINING_LR', 0)) or config.get('training', {}).get('learning_rate', 0.001)
-        batch_size = int(os.environ.get('TRAINING_BATCH_SIZE', 0)) or config.get('training', {}).get('batch_size', 64)
+        num_epochs = int(os.environ.get('TRAINING_EPOCHS', 0)) or config.get('training', {}).get('num_epochs', recommended_epochs)
+        learning_rate = float(os.environ.get('TRAINING_LR', 0)) or config.get('training', {}).get('learning_rate', recommended_lr)
+        batch_size = int(os.environ.get('TRAINING_BATCH_SIZE', 0)) or config.get('training', {}).get('batch_size', recommended_batch)
     
     # Train with TUI
     try:

@@ -15,6 +15,8 @@ from datetime import datetime
 from typing import Dict, Optional, List, Tuple
 import re
 import xml.etree.ElementTree as ET
+import ast
+from collections import Counter
 
 try:
     import Xlib.display
@@ -38,6 +40,10 @@ class LinuxBrainLogger:
         self.last_terminal_command = None
         self.last_git_repo = None
         self.known_processes = set()
+        self.action_counts = Counter()
+        self.feed_counts = Counter()
+        self.last_log_summary = time.time()
+        self.summary_interval = 20  # seconds between log summaries
         
         # Shell history tracking
         self.home = Path.home()
@@ -55,9 +61,26 @@ class LinuxBrainLogger:
         
         # Git repos tracking
         self.tracked_git_repos = set()
+        self.git_history_markers: Dict[str, int] = {}
+        self.git_cli_history_file = self.home / '.config/git/command-history'
+        self.git_cli_history_position = 0
         
         # VS Code recent files
         self.vscode_history_path = self.home / '.config/Code/User/History'
+
+        # Package manager histories
+        self.npm_logs_dir = self.home / '.npm/_logs'
+        self.processed_npm_logs: Dict[str, float] = {}
+        self.pip_log_files = [
+            self.home / '.cache/pip/pip.log',
+            self.home / '.cache/pip/log/debug.log',
+            self.home / '.pip/pip.log'
+        ]
+        self.pip_log_positions: Dict[str, int] = {}
+
+        # Python REPL history
+        self.python_history_file = self.home / '.python_history'
+        self.python_history_position = 0
         
         self._initialize_tracking()
     
@@ -69,6 +92,13 @@ class LinuxBrainLogger:
                     self.known_processes.add(proc.info['pid'])
                 except:
                     continue
+        except:
+            pass
+
+        try:
+            cwd_repo = self._get_git_repo_from_path(os.getcwd())
+            if cwd_repo:
+                self.tracked_git_repos.add(cwd_repo)
         except:
             pass
     
@@ -86,9 +116,71 @@ class LinuxBrainLogger:
                 headers={'X-API-Key': self.api_key},
                 timeout=2
             )
-            return response.status_code == 201
+            success = response.status_code == 201
+            if success:
+                self._record_log_summary(action_type, context)
+            return success
         except:
             return False
+
+    def _infer_feed_label(self, action_type: str, context: Dict) -> Optional[str]:
+        """Infer a human-friendly label for log summaries."""
+        if not context:
+            return None
+        
+        priority_keys = [
+            ('shell', lambda v: f"{v} shell"),
+            ('browser', lambda v: f"{v} browser"),
+            ('package_manager', lambda v: f"{v} packages"),
+            ('git_command', lambda v: f"git {v}"),
+            ('git_repo', lambda v: Path(v).name if v else None),
+            ('app', lambda v: v),
+            ('source_file', lambda v: Path(v).name if v else v),
+            ('file_path', lambda v: Path(v).name if v else v),
+        ]
+        
+        for key, formatter in priority_keys:
+            value = context.get(key)
+            if value:
+                try:
+                    label = formatter(value)
+                except Exception:
+                    label = value
+                if label:
+                    return str(label)
+        return action_type
+
+    def _record_log_summary(self, action_type: str, context: Dict):
+        """Track counts and periodically print a summary for logs/system_logger.log."""
+        self.action_counts[action_type] += 1
+        feed_label = self._infer_feed_label(action_type, context)
+        if feed_label:
+            self.feed_counts[feed_label] += 1
+        
+        now = time.time()
+        if now - self.last_log_summary < self.summary_interval:
+            return
+        
+        total = sum(self.action_counts.values())
+        top_actions = ', '.join(f"{name}:{count}" for name, count in self.action_counts.most_common(3))
+        top_feeds = ', '.join(f"{name}:{count}" for name, count in self.feed_counts.most_common(3))
+        preview = context.get('full_command') or context.get('url') or context.get('file_path') \
+            or context.get('title') or context.get('command')
+        if isinstance(preview, str) and len(preview) > 60:
+            preview = preview[:57] + '…'
+        
+        stamp = datetime.now().strftime('%H:%M:%S')
+        summary = f"[{stamp}] {total} actions • top actions [{top_actions}]"
+        if top_feeds:
+            summary += f" • feeds [{top_feeds}]"
+        summary += f" • last={action_type}"
+        if feed_label:
+            summary += f" ({feed_label})"
+        if preview:
+            summary += f" -> {preview}"
+        
+        print(summary)
+        self.last_log_summary = now
     
     # ==================== FILE OPERATIONS ====================
     
@@ -233,6 +325,75 @@ class LinuxBrainLogger:
                     
                     self.history_positions['fish'] = current_size
         except Exception as e:
+            pass
+
+    def track_python_repl_history(self):
+        """Track Python REPL history from ~/.python_history."""
+        if not self.python_history_file.exists():
+            return
+        
+        try:
+            current_size = self.python_history_file.stat().st_size
+            last_pos = self.python_history_position
+            
+            if current_size > last_pos:
+                with open(self.python_history_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    f.seek(last_pos)
+                    new_lines = f.readlines()
+                
+                for line in new_lines:
+                    command = line.strip()
+                    if not command:
+                        continue
+                    
+                    self.log_action('python_repl_command', {
+                        'code': command[:500],
+                        'source_file': str(self.python_history_file),
+                        'timestamp': time.time()
+                    })
+                
+                self.python_history_position = current_size
+        except Exception:
+            pass
+
+    def track_git_cli_history(self):
+        """Track git command history from git's command-history file."""
+        if not self.git_cli_history_file.exists():
+            return
+        
+        try:
+            current_size = self.git_cli_history_file.stat().st_size
+            last_pos = self.git_cli_history_position
+            
+            if current_size > last_pos:
+                with open(self.git_cli_history_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    f.seek(last_pos)
+                    lines = f.readlines()
+                
+                for raw_line in lines:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    
+                    timestamp = time.time()
+                    command = line
+                    
+                    if '\t' in line:
+                        meta, command = line.split('\t', 1)
+                        meta_parts = meta.split()
+                        try:
+                            timestamp = int(meta_parts[0])
+                        except:
+                            timestamp = time.time()
+                    
+                    self.log_action('git_cli_history', {
+                        'command': command.strip()[:500],
+                        'timestamp': timestamp,
+                        'source_file': str(self.git_cli_history_file)
+                    })
+                
+                self.git_cli_history_position = current_size
+        except Exception:
             pass
     
     def _process_command(self, command: str, timestamp: float, shell: str):
@@ -400,6 +561,97 @@ class LinuxBrainLogger:
             'args': args[:200],
             'timestamp': timestamp
         })
+
+    def _extract_npm_command(self, log_text: str) -> Optional[str]:
+        """Extract npm command from npm debug logs."""
+        for line in log_text.splitlines():
+            if 'verbose cli [' in line:
+                try:
+                    start = line.index('[')
+                    end = line.rindex(']') + 1
+                    cli_array = ast.literal_eval(line[start:end])
+                    if len(cli_array) >= 3:
+                        return f"npm {' '.join(cli_array[2:])}".strip()
+                except:
+                    continue
+            if line.strip().startswith('argv "'):
+                matches = re.findall(r'"([^"]+)"', line)
+                if len(matches) >= 3:
+                    return 'npm ' + ' '.join(matches[2:])
+        return None
+
+    def track_npm_history(self):
+        """Track npm CLI history from ~/.npm/_logs."""
+        if not self.npm_logs_dir.exists():
+            return
+        
+        try:
+            for log_file in sorted(self.npm_logs_dir.glob('*-debug.log')):
+                log_key = str(log_file)
+                current_mtime = log_file.stat().st_mtime
+                last_mtime = self.processed_npm_logs.get(log_key, 0)
+                
+                if current_mtime <= last_mtime:
+                    continue
+                
+                try:
+                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    
+                    command_line = self._extract_npm_command(content)
+                    if command_line:
+                        self.log_action('npm_history_command', {
+                            'command': command_line[:500],
+                            'log_file': log_key,
+                            'timestamp': current_mtime
+                        })
+                        self.processed_npm_logs[log_key] = current_mtime
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def track_pip_history(self):
+        """Track pip install history from pip debug logs."""
+        try:
+            for log_file in self.pip_log_files:
+                if not log_file.exists():
+                    continue
+                
+                log_key = str(log_file)
+                current_size = log_file.stat().st_size
+                last_pos = self.pip_log_positions.get(log_key, 0)
+                
+                if current_size <= last_pos:
+                    continue
+                
+                with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    f.seek(last_pos)
+                    new_lines = f.readlines()
+                
+                for line in new_lines:
+                    if 'Running command' in line:
+                        command = line.split('Running command', 1)[1].strip()
+                        if not command:
+                            continue
+                        
+                        timestamp = time.time()
+                        match = re.match(r'(\d{4}-\d{2}-\d{2}T[\d:.+-]+)', line)
+                        if match:
+                            try:
+                                timestamp = datetime.fromisoformat(match.group(1)).timestamp()
+                            except:
+                                timestamp = time.time()
+                        
+                        self.log_action('pip_history_command', {
+                            'command': command[:500],
+                            'log_file': log_key,
+                            'timestamp': timestamp
+                        })
+                
+                self.pip_log_positions[log_key] = current_size
+        except Exception:
+            pass
     
     def _get_current_git_repo(self) -> Optional[str]:
         """Get current git repository path."""
@@ -631,6 +883,65 @@ class LinuxBrainLogger:
                                 pass
         except Exception as e:
             pass
+
+    def track_git_commit_history(self):
+        """Track recent git commits from discovered repositories."""
+        if not self.tracked_git_repos:
+            return
+        
+        for repo_path in list(self.tracked_git_repos):
+            try:
+                repo = Path(repo_path)
+                if not repo.exists():
+                    continue
+                
+                result = subprocess.run(
+                    ['git', 'log', '-n', '25', '--pretty=format:%ct|%H|%an|%s'],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    cwd=repo
+                )
+                if result.returncode != 0:
+                    continue
+                
+                lines = [line for line in result.stdout.splitlines() if line.strip()]
+                if not lines:
+                    continue
+                
+                last_timestamp = self.git_history_markers.get(repo_path, 0)
+                new_commits = []
+                
+                for line in lines:
+                    parts = line.split('|', 3)
+                    if len(parts) < 4:
+                        continue
+                    timestamp, commit_hash, author, message = parts
+                    try:
+                        ts = int(timestamp.strip())
+                    except:
+                        ts = int(time.time())
+                    
+                    if ts <= last_timestamp:
+                        continue
+                    
+                    new_commits.append((ts, commit_hash.strip(), author.strip(), message.strip()))
+                
+                if not new_commits:
+                    continue
+                
+                for ts, commit_hash, author, message in reversed(new_commits[-10:]):
+                    self.log_action('git_commit_history', {
+                        'repo_path': repo_path,
+                        'commit': commit_hash,
+                        'author': author,
+                        'message': message[:300],
+                        'timestamp': ts
+                    })
+                
+                self.git_history_markers[repo_path] = max(ts for ts, *_ in new_commits)
+            except Exception:
+                continue
     
     # ==================== VS CODE RECENT FILES ====================
     
@@ -909,8 +1220,8 @@ class LinuxBrainLogger:
         """Run the comprehensive logger."""
         print("🧠 Linux Brain Logger started!")
         print("   Tracking: Shell History (zsh/bash/fish), Browser History, Recent Files,")
-        print("            Git Repos, VS Code Files, Files, Terminal, Network, Resources,")
-        print("            Focus Sessions, Apps, Windows")
+        print("            Git Repos + Commits, VS Code Files, Files, Terminal, Git CLI,")
+        print("            npm/pip/python histories, Network, Resources, Focus Sessions, Apps, Windows")
         
         # Initialize history positions
         for hist_file, path in [
@@ -930,6 +1241,10 @@ class LinuxBrainLogger:
         last_recent_files_check = time.time()
         last_git_repos_check = time.time()
         last_vscode_check = time.time()
+        last_git_history_check = time.time()
+        last_git_cli_check = time.time()
+        last_package_history_check = time.time()
+        last_python_history_check = time.time()
         
         while True:
             try:
@@ -961,11 +1276,24 @@ class LinuxBrainLogger:
                 if time.time() - last_git_repos_check >= 300:
                     self.track_git_repos()
                     last_git_repos_check = time.time()
+
+                # Git commit history (every 3 minutes)
+                if time.time() - last_git_history_check >= 180:
+                    self.track_git_commit_history()
+                    last_git_history_check = time.time()
                 
                 # VS Code recent files (every 30 seconds)
                 if time.time() - last_vscode_check >= 30:
                     self.track_vscode_recent_files()
                     last_vscode_check = time.time()
+
+                # Git CLI / python histories (every 20 seconds)
+                if time.time() - last_git_cli_check >= 20:
+                    self.track_git_cli_history()
+                    last_git_cli_check = time.time()
+                if time.time() - last_python_history_check >= 20:
+                    self.track_python_repl_history()
+                    last_python_history_check = time.time()
                 
                 # Network activity (every 30 seconds)
                 if time.time() - last_network_check >= 30:
@@ -976,6 +1304,12 @@ class LinuxBrainLogger:
                 if time.time() - last_resources_check >= 60:
                     self.track_system_resources()
                     last_resources_check = time.time()
+
+                # Package manager histories (every 45 seconds)
+                if time.time() - last_package_history_check >= 45:
+                    self.track_npm_history()
+                    self.track_pip_history()
+                    last_package_history_check = time.time()
                 
                 # App launches (every 5 seconds)
                 if time.time() - last_app_check >= 5:

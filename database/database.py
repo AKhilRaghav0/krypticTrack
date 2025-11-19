@@ -64,12 +64,24 @@ class DatabaseManager:
     
     def connect(self):
         """Establish database connection."""
+        # Check if connection exists and is still open
         if self.connection is None:
             self.connection = sqlite3.connect(
                 str(self.db_path),
                 check_same_thread=False
             )
             self.connection.row_factory = sqlite3.Row
+        else:
+            # Check if connection is closed and reconnect if needed
+            try:
+                self.connection.execute("SELECT 1")
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                # Connection is closed, reconnect
+                self.connection = sqlite3.connect(
+                    str(self.db_path),
+                    check_same_thread=False
+                )
+                self.connection.row_factory = sqlite3.Row
         return self.connection
     
     def close(self):

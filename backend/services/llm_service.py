@@ -87,7 +87,6 @@ You are an AI assistant helping analyze user behavior data. Here's the user's co
         # Add search results if provided (from Spotlight queries)
         search_context = ""
         if search_results and len(search_results) > 0:
-            from datetime import datetime
             search_context = "\n\nRelevant data found from user's history:\n"
             for i, result in enumerate(search_results[:10], 1):  # Top 10 results
                 action_type = result.get('action_type', 'unknown')

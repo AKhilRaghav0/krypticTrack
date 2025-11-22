@@ -1,207 +1,156 @@
-import { useState, useEffect } from 'react'
-import { useInsights } from '../hooks/useInsights'
-import { api } from '../services/api'
-import { Lightbulb, Sparkle, Target, ArrowClockwise } from '@phosphor-icons/react'
+import useSWR from 'swr'
+import { Lightbulb, ArrowUp, Warning, Sparkle } from '@phosphor-icons/react'
+import { getPredictions, getPatterns, getBlockers } from '@/services/api'
+import type { Prediction, Pattern, Blocker } from '@/types'
 
-export default function Insights() {
-  const { insights, loading } = useInsights()
-  const [llmInsight, setLlmInsight] = useState<string | null>(null)
-  const [llmLoading, setLlmLoading] = useState(false)
-  const [llmAvailable, setLlmAvailable] = useState(false)
+export function Insights() {
+    const { data: prediction } = useSWR<Prediction>('/predictions', getPredictions, {
+        refreshInterval: 60000,
+    })
 
-  const getInsightIcon = (type: string) => {
-    switch (type) {
-      case 'time_pattern':
-        return Target
-      case 'behavior_pattern':
-        return Sparkle
-      default:
-        return Lightbulb
-    }
-  }
+    const { data: patterns } = useSWR<Pattern[]>('/patterns', getPatterns)
+    const { data: blockers } = useSWR<Blocker[]>('/blockers', getBlockers)
 
-  const getInsightColor = (confidence: number) => {
-    if (confidence >= 0.8) return 'bg-green-900/30 text-green-400 border-green-700'
-    if (confidence >= 0.6) return 'bg-yellow-900/30 text-yellow-400 border-yellow-700'
-    return 'bg-gray-700/50 text-gray-300 border-gray-600'
-  }
+    return (
+        <div className="min-h-screen bg-forest-dark p-8">
+            <div className="fixed inset-0 bg-[linear-gradient(to_right,#3F4F4410_1px,transparent_1px),linear-gradient(to_bottom,#3F4F4410_1px,transparent_1px)] bg-[size:4rem_4rem] pointer-events-none opacity-20" />
 
-  useEffect(() => {
-    // Check LLM availability
-    const checkLLM = async () => {
-      try {
-        const response = await api.checkLLMStatus()
-        if (response.data) {
-          const available = response.data.available || false
-          setLlmAvailable(available)
-          
-        } else if (response.error) {
-          // If status check fails, assume unavailable
-          setLlmAvailable(false)
-        }
-      } catch (error) {
-        // If status check throws, assume unavailable
-        setLlmAvailable(false)
-      }
-    }
-    checkLLM()
-    // Re-check every 30 seconds
-    const interval = setInterval(checkLLM, 30000)
-    return () => clearInterval(interval)
-  }, [insights.length])
-
-  const handleSurprisedMe = async () => {
-    setLlmLoading(true)
-    setLlmInsight(null)
-    
-    // Re-check LLM status when button is clicked (in case it changed)
-    try {
-      const statusResponse = await api.checkLLMStatus()
-      if (statusResponse.data?.available) {
-        setLlmAvailable(true)
-      } else {
-        setLlmAvailable(false)
-      }
-    } catch (error) {
-      // Continue anyway - let the API call handle it
-    }
-    
-    try {
-      const response = await api.getSurprisedMe()
-      
-      // Check for error in response
-      if (response.error) {
-        setLlmInsight(`⚠️ ${response.error}`)
-        setLlmAvailable(false)
-        return
-      }
-      
-      if (response.data) {
-        if (response.data.error) {
-          setLlmInsight(`⚠️ ${response.data.error}`)
-          setLlmAvailable(false)
-        } else if (response.data.insight) {
-          setLlmInsight(response.data.insight)
-          setLlmAvailable(true) // If we got an insight, LLM is available
-        } else {
-          setLlmInsight('⚠️ No insight generated. Please try again.')
-        }
-      } else {
-        setLlmInsight('⚠️ Failed to generate insight. Please check LM Studio is running.')
-        setLlmAvailable(false)
-      }
-    } catch (error: any) {
-      const errorMsg = error.message || 'Failed to generate insight. Make sure LM Studio is running on http://localhost:1234.'
-      setLlmInsight(`⚠️ ${errorMsg}`)
-      setLlmAvailable(false)
-    } finally {
-      setLlmLoading(false)
-    }
-  }
-
-  return (
-    <div className="animate-fade-in">
-      <div className="mb-8 pb-6 border-b border-gray-700">
-        <h1 className="text-4xl font-bold text-gray-100 tracking-tight mb-2">
-          Insights
-        </h1>
-        <p className="text-lg text-gray-400 max-w-2xl leading-relaxed">
-          Discovered patterns and behavioral insights from your activity data
-        </p>
-      </div>
-
-      <div className="space-y-6">
-        {loading ? (
-          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-12 text-center">
-            <div className="text-gray-500">Loading insights...</div>
-          </div>
-        ) : insights.length === 0 ? (
-          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-12 text-center">
-            <Lightbulb className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-gray-100 mb-2">
-              No insights yet
-            </h3>
-            <p className="text-gray-400">
-              Insights will appear here as we analyze your behavior patterns
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {insights.map((insight: any) => {
-              const Icon = getInsightIcon(insight.pattern_type)
-              const colorClass = getInsightColor(insight.confidence)
-
-              return (
-                <div
-                  key={insight.id}
-                  className={`bg-gray-800/50 backdrop-blur-sm rounded-xl border-2 ${colorClass} shadow-lg p-6 hover:shadow-xl transition-all`}
-                >
-                  <div className="flex items-start gap-4 mb-4">
-                    <div className={`w-12 h-12 ${colorClass} rounded-xl flex items-center justify-center flex-shrink-0`}>
-                      <Icon className="w-6 h-6" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                          {insight.pattern_type.replace(/_/g, ' ')}
-                        </span>
-                        <span className="text-xs font-semibold">
-                          {Math.round(insight.confidence * 100)}% confidence
-                        </span>
-                      </div>
-                      <p className="text-gray-100 leading-relaxed">
-                        {insight.description}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-xs text-gray-400">
-                    Discovered{' '}
-                    {new Date(insight.discovered_at).toLocaleDateString()}
-                  </div>
+            <div className="relative z-10 max-w-7xl mx-auto">
+                <div className="mb-8">
+                    <h1 className="text-4xl font-bold font-mono text-earth-cream mb-2">
+                        AI Insights
+                    </h1>
+                    <p className="text-earth-cream/60 font-mono">
+                        Patterns, predictions, and recommendations
+                    </p>
                 </div>
-              )
-            })}
-          </div>
-        )}
 
-        {/* Surprised Me Section */}
-        <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700 shadow-lg p-6">
-          <h2 className="text-xl font-bold text-gray-100 mb-4 flex items-center gap-2">
-            <Sparkle className="w-5 h-5" />
-            Surprised Me
-          </h2>
-          <p className="text-gray-400 mb-4">
-            Get a random but true insight about your behavior powered by AI
-          </p>
-          <button
-            onClick={handleSurprisedMe}
-            disabled={llmLoading}
-            className="px-4 py-2 bg-[#a31d1d] text-white rounded-lg font-semibold hover:bg-[#7a1515] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {llmLoading ? (
-              <>
-                <ArrowClockwise className="w-4 h-4 animate-spin" />
-                Generating...
-              </>
-            ) : (
-              <>
-                <Sparkle className="w-4 h-4" />
-                Generate New Insight
-              </>
-            )}
-          </button>
-          {!llmAvailable && !llmLoading && (
-            <p className="text-sm text-gray-400 mt-2">
-              ⚠️ LLM service may not be available. Click the button to try anyway - it will check status automatically.
-            </p>
-          )}
-          {llmInsight && (
-            <div className="mt-4 p-4 bg-[#d4a574]/20 border border-[#d4a574]/30 rounded-lg">
-              <p className="text-gray-100 leading-relaxed">{llmInsight}</p>
+                {/* AI Prediction Hero */}
+                {prediction && (
+                    <div className="gradient-warm grain rounded-2xl p-12 mb-8 text-center">
+                        <div className="flex items-center justify-center gap-2 mb-4">
+                            <Sparkle size={24} weight="fill" className="text-forest-dark" />
+                            <h2 className="text-sm font-mono font-semibold text-forest-dark/70">
+                                Today's Prediction
+                            </h2>
+                        </div>
+
+                        <div className="text-7xl font-bold font-mono text-forest-dark mb-3">
+                            {prediction.predictedScore.toFixed(0)}
+                            <span className="text-3xl text-forest-dark/40">/100</span>
+                        </div>
+
+                        <div className="inline-block px-4 py-2 bg-forest-dark/10 rounded-full">
+                            <p className="text-sm font-mono text-forest-dark/70">
+                                {(prediction.confidence * 100).toFixed(0)}% confidence • {prediction.reasoning}
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {/* Two Column Layout */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                    {/* Productive Environments */}
+                    <div className="gradient-forest grain rounded-xl p-6">
+                        <div className="flex items-center gap-2 mb-4">
+                            <ArrowUp size={24} weight="bold" className="text-earth-tan" />
+                            <h3 className="text-xl font-bold font-mono text-earth-cream">
+                                Productive Environments
+                            </h3>
+                        </div>
+
+                        {patterns && patterns.length > 0 ? (
+                            <div className="space-y-3">
+                                {patterns.map((pattern, i) => (
+                                    <div
+                                        key={i}
+                                        className="bg-forest/50 rounded-lg p-4 border border-earth-cream/10"
+                                    >
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div className="flex-1">
+                                                <p className="text-earth-cream font-mono text-sm">
+                                                    {pattern.apps.slice(0, 3).join(' + ')}
+                                                </p>
+                                            </div>
+                                            <span className="text-earth-tan font-mono font-semibold text-sm">
+                                                {pattern.avgProductivity.toFixed(0)}/100
+                                            </span>
+                                        </div>
+                                        <p className="text-earth-cream/50 font-mono text-xs">
+                                            Used {pattern.frequency}x
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <p className="text-earth-cream/50 font-mono text-sm">
+                                Not enough data to detect patterns
+                            </p>
+                        )}
+                    </div>
+
+                    {/* Blockers */}
+                    <div className="gradient-earth grain rounded-xl p-6">
+                        <div className="flex items-center gap-2 mb-4">
+                            <Warning size={24} weight="bold" className="text-status-warning" />
+                            <h3 className="text-xl font-bold font-mono text-earth-cream">
+                                Productivity Blockers
+                            </h3>
+                        </div>
+
+                        {blockers && blockers.length > 0 ? (
+                            <div className="space-y-4">
+                                {blockers.map((blocker, i) => (
+                                    <div key={i} className="bg-forest-dark/30 rounded-lg p-4">
+                                        <div className="flex items-start gap-2 mb-2">
+                                            <Warning size={16} weight="bold" className="text-status-warning mt-1" />
+                                            <div className="flex-1">
+                                                <p className="text-earth-cream font-mono font-semibold text-sm mb-1">
+                                                    {blocker.pattern}
+                                                </p>
+                                                <p className="text-earth-cream/60 font-mono text-xs mb-2">
+                                                    {blocker.impact}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="pl-6">
+                                            <p className="text-status-info font-mono text-xs">
+                                                💡 {blocker.suggestion}
+                                            </p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="text-center py-8">
+                                <p className="text-status-success font-mono text-sm">
+                                    ✨ No blockers detected!
+                                </p>
+                                <p className="text-earth-cream/50 font-mono text-xs mt-1">
+                                    You're on a roll
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Weekly Review Placeholder */}
+                <div className="gradient-forest grain rounded-xl p-8">
+                    <div className="flex items-center gap-2 mb-4">
+                        <Lightbulb size={24} weight="fill" className="text-earth-tan" />
+                        <h3 className="text-xl font-bold font-mono text-earth-cream">
+                            AI Weekly Review
+                        </h3>
+                    </div>
+                    <div className="text-center py-12 text-earth-cream/50 font-mono">
+                        Generate comprehensive weekly review with AI analysis
+                        <br />
+                        <button className="btn-primary mt-4">
+                            Generate Review
+                        </button>
+                    </div>
+                </div>
             </div>
-          )}
         </div>
-      </div>
-    </div>
-  )
+    )
 }

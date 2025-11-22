@@ -14,12 +14,12 @@ function safeParseURL(urlString) {
     if (!urlString || typeof urlString !== 'string') {
         return null;
     }
-    
+
     // Only parse http/https URLs
     if (!urlString.startsWith('http://') && !urlString.startsWith('https://')) {
         return null;
     }
-    
+
     try {
         return new URL(urlString);
     } catch (e) {
@@ -31,7 +31,7 @@ function safeParseURL(urlString) {
 chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.set({ isLogging: true });
     console.log('KrypticTrack: Extension installed');
-    
+
     // Start tracking browser history
     startHistoryTracking();
 });
@@ -55,7 +55,7 @@ async function startHistoryTracking() {
             });
         });
     });
-    
+
     // Listen for new history items
     chrome.history.onVisited.addListener((historyItem) => {
         logAction('history_visit', {
@@ -74,12 +74,12 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     const previousTab = currentTab;
     const previousDuration = previousTab ? (Date.now() - tabStartTime) : 0;
-    
+
     // Log tab_switch with full context
     if (previousTab && previousTab.url) {
         const prevUrl = safeParseURL(previousTab.url);
         const currUrl = safeParseURL(tab.url);
-        
+
         if (prevUrl || currUrl) {
             logAction('tab_switch', {
                 from_url: previousTab.url,
@@ -106,7 +106,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
                 timestamp: Date.now()
             });
         }
-        
+
         // Add to tab history (only for http/https URLs)
         if (prevUrl) {
             tabHistory.push({
@@ -118,7 +118,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             if (tabHistory.length > 100) tabHistory.shift();
         }
     }
-    
+
     currentTab = tab;
     tabStartTime = Date.now();
     scrollDepth = 0;
@@ -151,7 +151,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // Track navigation - LOG EVERYTHING
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (!isLogging) return;
-    
+
     // Log page load when status is complete
     if (changeInfo.status === 'complete' && tab.url) {
         const url = safeParseURL(tab.url);
@@ -175,7 +175,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
                 timestamp: Date.now()
             });
         }
-        
+
         // Update current tab if it's the active one
         if (currentTab && currentTab.id === tabId) {
             currentTab = tab;
@@ -183,7 +183,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             scrollDepth = 0;
         }
     }
-    
+
     // Track URL changes
     if (changeInfo.url && tab.url) {
         const url = safeParseURL(tab.url);
@@ -229,7 +229,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 // Listen for messages from content script - LOG EVERYTHING
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabUrl = sender.tab ? sender.tab.url : '';
-    
+
     if (message.type === 'scroll') {
         scrollDepth = Math.max(scrollDepth, message.scrollPercentage);
         logAction('scroll', {
@@ -470,14 +470,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             timestamp: Date.now()
         });
     }
-    
+
     sendResponse({ success: true });
 });
 
 // Periodic history sync (every 5 minutes)
 setInterval(() => {
     if (!isLogging) return;
-    
+
     chrome.history.search({
         text: '',
         maxResults: 50,
@@ -512,7 +512,7 @@ async function logAction(actionType, context) {
                 context: context
             })
         });
-        
+
         if (!response.ok) {
             console.warn('KrypticTrack: Backend returned error', response.status);
         }
@@ -535,3 +535,343 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.storage.local.get(['isLogging'], (result) => {
     isLogging = result.isLogging !== false;
 });
+
+// ============================================
+// PHASE 2: SMART NOTIFICATIONS SYSTEM
+// ============================================
+
+// Notification state tracking
+let focusStartTime = null;
+let lastBreakNotification = null;
+let distractingSiteStartTime = null;
+let currentSiteCategory = 'neutral';
+let totalFocusTime = 0;
+
+// Site categorization
+const PRODUCTIVE_SITES = [
+    'github.com', 'stackoverflow.com', 'docs.', 'developer.', 'localhost',
+    'learn.', 'tutorial', 'documentation', 'api.', 'dev.'
+];
+
+const DISTRACTING_SITES = [
+    'youtube.com', 'facebook.com', 'twitter.com', 'reddit.com',
+    'instagram.com', 'tiktok.com', 'netflix.com', 'twitch.tv'
+];
+
+// Classify site
+function classifySite(url) {
+    if (!url) return 'neutral';
+    const urlLower = url.toLowerCase();
+
+    if (PRODUCTIVE_SITES.some(site => urlLower.includes(site))) {
+        return 'productive';
+    } else if (DISTRACTING_SITES.some(site => urlLower.includes(site))) {
+        return 'distracting';
+    }
+    return 'neutral';
+}
+
+// 1. BREAK REMINDERS (Pomodoro-style)
+// Check every minute if user needs a break
+chrome.alarms.create('checkBreakTime', { periodInMinutes: 1 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'checkBreakTime') {
+        checkIfBreakNeeded();
+    }
+});
+
+async function checkIfBreakNeeded() {
+    if (!isLogging) return;
+
+    const now = Date.now();
+
+    // Track focus time
+    if (currentSiteCategory === 'productive') {
+        if (!focusStartTime) {
+            focusStartTime = now;
+        }
+
+        const focusDuration = (now - focusStartTime) / 1000 / 60; // minutes
+
+        // Notify after 50 minutes of continuous focus
+        if (focusDuration >= 50 && (!lastBreakNotification || (now - lastBreakNotification) > 60 * 60 * 1000)) {
+            showBreakReminder();
+            lastBreakNotification = now;
+            focusStartTime = null; // Reset
+        }
+    } else {
+        focusStartTime = null; // Reset if not on productive site
+    }
+}
+
+function showBreakReminder() {
+    chrome.notifications.create('break-reminder', {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: '🧠 Time for a break!',
+        message: 'You\'ve been focused for 50 minutes. Take a 5-minute break to recharge.',
+        buttons: [
+            { title: 'Start Break (5min)' },
+            { title: 'Snooze 10min' }
+        ],
+        priority: 1
+    });
+}
+
+// Handle break reminder button clicks
+chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+    if (notificationId === 'break-reminder') {
+        if (buttonIndex === 0) {
+            // Start break - create 5-minute alarm
+            chrome.alarms.create('breakEnd', { delayInMinutes: 5 });
+            chrome.notifications.clear('break-reminder');
+
+            chrome.notifications.create('break-started', {
+                type: 'basic',
+                iconUrl: 'icons/icon128.png',
+                title: '☕ Break started',
+                message: 'Enjoy your 5-minute break. I\'ll remind you when it\'s over.',
+                priority: 0
+            });
+        } else if (buttonIndex === 1) {
+            // Snooze - remind again in 10 minutes
+            lastBreakNotification = Date.now() - (40 * 60 * 1000); // Will trigger again in 10 min
+            chrome.notifications.clear('break-reminder');
+        }
+    }
+});
+
+// Break end notification
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'breakEnd') {
+        chrome.notifications.create('break-end', {
+            type: 'basic',
+            iconUrl: 'icons/icon128.png',
+            title: '🚀 Break over!',
+            message: 'Ready to get back to work? Let\'s make it productive!',
+            priority: 1
+        });
+    }
+});
+
+// 2. DISTRACTION WARNINGS
+// Track time on distracting sites
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    const category = classifySite(tab.url);
+
+    // Site changed
+    if (category !== currentSiteCategory) {
+        // Check if leaving distracting site
+        if (currentSiteCategory === 'distracting' && distractingSiteStartTime) {
+            const timeSpent = (Date.now() - distractingSiteStartTime) / 1000 / 60;
+            if (timeSpent >= 15) {
+                // User spent 15+ minutes on distracting site
+                logAction('distraction_session', {
+                    duration_minutes: timeSpent,
+                    timestamp: Date.now()
+                });
+            }
+            distractingSiteStartTime = null;
+        }
+
+        // Entering distracting site
+        if (category === 'distracting') {
+            distractingSiteStartTime = Date.now();
+
+            // Check after 15 minutes
+            setTimeout(() => {
+                if (currentSiteCategory === 'distracting') {
+                    showDistractionWarning();
+                }
+            }, 15 * 60 * 1000);
+        }
+
+        currentSiteCategory = category;
+    }
+});
+
+function showDistractionWarning() {
+    chrome.notifications.create('distraction-warning', {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: '⚠️ Distraction Alert',
+        message: 'You\'ve been on this site for 15 minutes. Time to refocus on your goals?',
+        buttons: [
+            { title: 'Back to Work' },
+            { title: 'Just 5 more min' }
+        ],
+        priority: 1
+    });
+}
+
+// Handle distraction warning clicks
+chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+    if (notificationId === 'distraction-warning') {
+        if (buttonIndex === 0) {
+            // Back to work - open dashboard
+            chrome.tabs.create({ url: 'http://localhost:3000' });
+            chrome.notifications.clear('distraction-warning');
+        } else {
+            // Snooze
+            chrome.notifications.clear('distraction-warning');
+        }
+    }
+});
+
+// 3. GOAL MISALIGNMENT ALERTS
+// Check every 30 minutes if user is aligned with goals
+chrome.alarms.create('checkGoalAlignment', { periodInMinutes: 30 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'checkGoalAlignment') {
+        checkGoalAlignment();
+    }
+});
+
+async function checkGoalAlignment() {
+    if (!isLogging) return;
+
+    try {
+        // Fetch active goals from backend
+        const response = await fetch(`${API_URL}/goals`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        if (!response.ok) return;
+
+        const goals = await response.json();
+        const activeGoals = goals.filter(g => g.status === 'active' || !g.status);
+
+        if (activeGoals.length === 0) return;
+
+        // Check if current activity aligns with any goal
+        if (currentTab && currentTab.url) {
+            const url = currentTab.url.toLowerCase();
+            const title = (currentTab.title || '').toLowerCase();
+
+            let aligned = false;
+            for (const goal of activeGoals) {
+                const keywords = goal.keywords || [];
+                const goalText = (goal.goal_text || '').toLowerCase();
+
+                // Check if URL or title contains goal keywords
+                if (keywords.some(kw => url.includes(kw.toLowerCase()) || title.includes(kw.toLowerCase()))) {
+                    aligned = true;
+                    break;
+                }
+
+                // Check if goal text is in URL/title
+                const goalWords = goalText.split(' ').filter(w => w.length > 3);
+                if (goalWords.some(word => url.includes(word) || title.includes(word))) {
+                    aligned = true;
+                    break;
+                }
+            }
+
+            // If not aligned and on neutral/distracting site, show alert
+            if (!aligned && (currentSiteCategory === 'neutral' || currentSiteCategory === 'distracting')) {
+                showGoalMisalignmentAlert(activeGoals[0]);
+            }
+        }
+    } catch (error) {
+        console.error('Failed to check goal alignment:', error);
+    }
+}
+
+function showGoalMisalignmentAlert(goal) {
+    chrome.notifications.create('goal-misalignment', {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: '🎯 Goal Reminder',
+        message: `Remember your goal: "${goal.goal_text}". Is this helping you get there?`,
+        buttons: [
+            { title: 'View Goals' },
+            { title: 'Dismiss' }
+        ],
+        priority: 1
+    });
+}
+
+// Handle goal misalignment clicks
+chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+    if (notificationId === 'goal-misalignment') {
+        if (buttonIndex === 0) {
+            // View goals
+            chrome.tabs.create({ url: 'http://localhost:3000/goals' });
+            chrome.notifications.clear('goal-misalignment');
+        } else {
+            // Dismiss
+            chrome.notifications.clear('goal-misalignment');
+        }
+    }
+});
+
+// 4. DAILY SUMMARY NOTIFICATION
+// Schedule daily summary at 6 PM
+chrome.alarms.create('dailySummary', {
+    when: getNextDailySummaryTime(),
+    periodInMinutes: 24 * 60
+});
+
+function getNextDailySummaryTime() {
+    const now = new Date();
+    const summary = new Date();
+    summary.setHours(18, 0, 0, 0); // 6 PM
+
+    if (now > summary) {
+        // If past 6 PM, schedule for tomorrow
+        summary.setDate(summary.getDate() + 1);
+    }
+
+    return summary.getTime();
+}
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name === 'dailySummary') {
+        await showDailySummary();
+    }
+});
+
+async function showDailySummary() {
+    try {
+        const response = await fetch(`${API_URL}/stats/quick`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        if (!response.ok) return;
+
+        const stats = await response.json();
+
+        chrome.notifications.create('daily-summary', {
+            type: 'basic',
+            iconUrl: 'icons/icon128.png',
+            title: '📊 Daily Productivity Summary',
+            message: `Today's score: ${Math.round(stats.focusPercentage || 0)}/100\nFocus time: ${stats.focusedTime || '0m'}\nContext switches: ${stats.contextSwitches || 0}`,
+            buttons: [
+                { title: 'View Dashboard' }
+            ],
+            priority: 2
+        });
+    } catch (error) {
+        console.error('Failed to show daily summary:', error);
+    }
+}
+
+// Handle daily summary click
+chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+    if (notificationId === 'daily-summary') {
+        if (buttonIndex === 0) {
+            chrome.tabs.create({ url: 'http://localhost:3000' });
+            chrome.notifications.clear('daily-summary');
+        }
+    }
+});
+
+// Clear notifications when clicked
+chrome.notifications.onClicked.addListener((notificationId) => {
+    chrome.notifications.clear(notificationId);
+});
+
+console.log('KrypticTrack: Smart notifications system initialized');

@@ -1,1379 +1,347 @@
-"""API routes for KrypticTrack backend."""
+"""
+API Routes for Frontend Integration
+"""
 
-from flask import Blueprint, request, jsonify, current_app
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-import time
-import json
-import threading
-import subprocess
-from pathlib import Path
-from typing import Dict, Any
-from datetime import datetime
-from backend.utils.cache import cached
+from flask import Blueprint, jsonify, request
+from datetime import datetime, timedelta
+from database import DatabaseManager
 
-api_bp = Blueprint('api', __name__)
+# Create blueprint
+api_bp = Blueprint('api', __name__, url_prefix='/api')
 
-# Rate limiter will be accessed from app config
-
-# Training state (in-memory, could be moved to database)
-training_state = {
-    'status': 'idle',  # idle, training, completed, error, stopped
-    'progress': 0,
-    'current_epoch': 0,
-    'total_epochs': 0,
-    'message': '',
-    'started_at': None,
-    'completed_at': None,
-    'model_path': None,
-    'error': None,
-    'logs': [],  # Training logs (last 100 lines)
-    'metrics': {  # Current epoch metrics
-        'loss': None,
-        'reward_mean': None,
-        'reward_std': None,
-        'learning_rate': None
-    },
-    'history': {  # Training history
-        'loss': [],
-        'reward_mean': [],
-        'reward_std': []
-    }
-}
-training_lock = threading.Lock()
-training_process = None  # Store the subprocess so we can kill it
-MAX_LOG_LINES = 100
-
+# Initialize database
+db = DatabaseManager('data/kryptic_track.db', False)
+conn = db.connect()
 
 @api_bp.route('/log-action', methods=['POST'])
 def log_action():
-    """
-    Receive action data from any source (VS Code, Chrome, System).
-    
-    Expected JSON:
-    {
-        "source": "vscode" | "chrome" | "system",
-        "action_type": "file_edit" | "page_visit" | "app_switch" | etc.,
-        "context": {
-            ...action-specific context...
-        }
-    }
-    """
+    """Log a user action."""
     try:
-        data = request.get_json()
+        from flask import request
+        import json
+        import time
         
+        data = request.json
         if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
-        
-        # Validate required fields - support both 'context' and 'context_json'
-        required_fields = ['source', 'action_type']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({'error': f'Missing required field: {field}'}), 400
-        
-        # Filter out high-frequency/noisy actions that bloat the neural network
-        # These events are too frequent and don't provide meaningful signal
-        FILTERED_ACTION_TYPES = {
-            'dom_change',  # Too frequent, not useful
-            'mouse_move',  # Too frequent, creates bloat
-            'mouse_enter',  # Too frequent, creates bloat
-            'mouse_leave',  # Too frequent, creates bloat
-        }
-        
-        action_type = data.get('action_type')
-        if action_type in FILTERED_ACTION_TYPES:
-            return jsonify({'success': True, 'message': f'Ignored (filtered: {action_type})'}), 200
-        
-        # Handle both 'context' and 'context_json' for backward compatibility
-        context_data = data.get('context') or data.get('context_json', {})
-        
-        # Get database from app context
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({'error': 'Database not configured'}), 500
-        
-        session_id = current_app.config.get('current_session_id', '')
-        
-        # Insert into actions table - use proper transaction handling
-        timestamp = time.time()
-        context_json = json.dumps(context_data) if isinstance(context_data, dict) else (context_data or '{}')
-        
-        conn = db.connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO actions 
-                (timestamp, source, action_type, context_json, session_id)
-                VALUES (?, ?, ?, ?, ?)
-            """, (timestamp, data['source'], data['action_type'], context_json, session_id))
+            return jsonify({'error': 'No data provided'}), 400
             
-            # Update session record
-            cursor.execute("""
-                UPDATE sessions 
-                SET total_actions = total_actions + 1
-                WHERE id = ?
-            """, (session_id,))
-            
-            # Update sources_used array
-            cursor.execute("SELECT sources_used FROM sessions WHERE id = ?", (session_id,))
-            result = cursor.fetchone()
-            sources = json.loads(result[0]) if result and result[0] else []
-            if data['source'] not in sources:
-                sources.append(data['source'])
-                cursor.execute("""
-                    UPDATE sessions 
-                    SET sources_used = ?
-                    WHERE id = ?
-                """, (json.dumps(sources), session_id))
-            
-            conn.commit()
-        except Exception as db_error:
-            conn.rollback()
-            raise db_error
-        
-        return jsonify({
-            'success': True,
-            'id': cursor.lastrowid,
-            'timestamp': timestamp
-        }), 201
-        
-    except Exception as e:
-        # Log to file only, NO console output
-        logger = current_app.config.get('logger')
-        if logger:
-            logger.log_action('error', 'Failed to log action', 
-                            error=str(e), source=data.get('source'), 
-                            action_type=data.get('action_type'))
-        # Return success to prevent retries - error is logged to file
-        return jsonify({'success': False, 'error': 'Logged to file'}), 200
-
-
-@api_bp.route('/stats', methods=['GET'])
-@cached(ttl=30)  # Cache for 30 seconds
-def get_stats():
-    """Get current session statistics."""
-    try:
-        db = current_app.config.get('db')
-        session_id = current_app.config.get('current_session_id', '')
-        
-        if not db:
-            return jsonify({
-                'session_id': session_id,
-                'total_actions': 0,
-                'active_sources': 0,
-                'actions_by_source': {},
-                'top_actions': [],
-                'recent_actions': [],
-                'session_duration_seconds': 0
-            }), 200
-        
-        conn = db.connect()
         cursor = conn.cursor()
-        
-        # Total actions - Count ALL actions (not just current session) for historical data
-        cursor.execute("SELECT COUNT(*) FROM actions")
-        result = cursor.fetchone()
-        total_actions = result[0] if result else 0
-        
-        # Active sources - Count distinct sources from ALL actions
-        cursor.execute("SELECT COUNT(DISTINCT source) FROM actions")
-        result = cursor.fetchone()
-        active_sources = result[0] if result else 0
-        
-        # Actions by source - ALL actions
         cursor.execute("""
-            SELECT source, COUNT(*) as count 
-            FROM actions 
-            GROUP BY source
-        """)
-        actions_by_source = {row[0]: row[1] for row in cursor.fetchall()}
+            INSERT INTO actions (timestamp, source, action_type, context_json)
+            VALUES (?, ?, ?, ?)
+        """, (
+            time.time(),
+            data.get('source', 'web'),
+            data.get('action_type', 'unknown'),
+            json.dumps(data.get('context', {}))
+        ))
+        conn.commit()
         
-        # Actions by type (top 10) - ALL actions
-        cursor.execute("""
-            SELECT action_type, COUNT(*) as count 
-            FROM actions 
-            GROUP BY action_type 
-            ORDER BY count DESC 
-            LIMIT 10
-        """)
-        top_actions = [{'type': row[0], 'count': row[1]} for row in cursor.fetchall()]
-        
-        # Recent actions - Last 10 actions
-        cursor.execute("""
-            SELECT id, timestamp, source, action_type, context_json
-            FROM actions
-            ORDER BY timestamp DESC
-            LIMIT 10
-        """)
-        recent_rows = cursor.fetchall()
-        recent_actions = []
-        for row in recent_rows:
-            try:
-                context = json.loads(row[4]) if row[4] else {}
-            except:
-                context = {}
-            recent_actions.append({
-                'id': row[0],
-                'timestamp': row[1],
-                'source': row[2],
-                'action_type': row[3],
-                'context': context
-            })
-        
-        # Session duration and info
-        session_duration = 0
-        session_start = None
-        sources_used = []
-        try:
-            cursor.execute("SELECT start_time, sources_used FROM sessions WHERE id = ?", (session_id,))
-            session_data = cursor.fetchone()
-            if session_data:
-                session_start = session_data[0]
-                session_duration = time.time() - session_start
-                sources_used = json.loads(session_data[1]) if session_data[1] else []
-        except:
-            pass
-        
-        return jsonify({
-            'session_id': session_id,
-            'total_actions': total_actions or 0,
-            'active_sources': active_sources or 0,
-            'actions_by_source': actions_by_source or {},
-            'top_actions': top_actions or [],
-            'recent_actions': recent_actions or [],
-            'session_duration_seconds': session_duration,
-            'session_start_time': session_start,
-            'sources_used': sources_used
-        }), 200
-        
+        return jsonify({'status': 'success'}), 201
     except Exception as e:
-        # Return empty stats instead of error
-        logger = current_app.config.get('logger')
-        if logger:
-            logger.log_action('error', 'Failed to get stats', error=str(e))
-        return jsonify({
-            'session_id': current_app.config.get('current_session_id', ''),
-            'total_actions': 0,
-            'active_sources': 0,
-            'actions_by_source': {},
-            'top_actions': [],
-            'recent_actions': [],
-            'session_duration_seconds': 0,
-            'error': str(e)
-        }), 200
-
-
-@api_bp.route('/predictions', methods=['GET'])
-def get_predictions():
-    """Get model predictions for next likely action."""
-    try:
-        model_manager = current_app.config.get('model_manager')
-        if not model_manager or not model_manager.model_loaded:
-            return jsonify({
-                'predicted_action': None,
-                'confidence': 0.0,
-                'message': 'Model not loaded. Train a model first.',
-                'available': False
-            }), 200
-        
-        # Get recent actions
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({
-                'predicted_action': None,
-                'confidence': 0.0,
-                'message': 'Database not available',
-                'available': False
-            }), 200
-        
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Get last 20 actions
-        cursor.execute("""
-            SELECT timestamp, source, action_type, context_json
-            FROM actions
-            ORDER BY timestamp DESC
-            LIMIT 20
-        """)
-        
-        rows = cursor.fetchall()
-        recent_actions = []
-        for row in rows:
-            try:
-                context = json.loads(row[3]) if row[3] else {}
-            except:
-                context = {}
-            recent_actions.append({
-                'timestamp': row[0],
-                'source': row[1],
-                'action_type': row[2],
-                'context': context
-            })
-        
-        # Reverse to get chronological order
-        recent_actions.reverse()
-        
-        # Get LLM service for explanations
-        from backend.services.llm_service import get_llm_service
-        llm_service = get_llm_service()
-        use_llm = request.args.get('use_llm', 'true').lower() == 'true' and llm_service.is_available()
-        
-        # Get prediction with optional LLM explanation
-        prediction = model_manager.predict_next_action(recent_actions, use_llm=use_llm, llm_service=llm_service if use_llm else None)
-        prediction['available'] = True
-        
-        # Format top_3 for frontend if available
-        if 'top_3' in prediction and prediction['top_3']:
-            # Calculate percentages for top 3
-            top_reward = prediction['top_3'][0]['reward'] if prediction['top_3'] else 1
-            for pred in prediction['top_3']:
-                if top_reward > 0:
-                    pred['percentage'] = (pred['reward'] / top_reward) * 100
-                else:
-                    pred['percentage'] = 0
-        prediction['llm_enabled'] = use_llm
-        
-        return jsonify(prediction), 200
-        
-    except Exception as e:
-        return jsonify({
-            'predicted_action': None,
-            'confidence': 0.0,
-            'message': f'Prediction error: {str(e)}',
-            'available': False
-        }), 200
-
-
-@api_bp.route('/model/evaluate', methods=['GET'])
-def evaluate_model():
-    """Evaluate model performance on recent actions."""
-    try:
-        model_manager = current_app.config.get('model_manager')
-        if not model_manager or not model_manager.model_loaded:
-            return jsonify({
-                'accuracy': 0.0,
-                'avg_reward': 0.0,
-                'message': 'Model not loaded',
-                'available': False
-            }), 200
-        
-        # Get test actions (last 100)
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({
-                'accuracy': 0.0,
-                'avg_reward': 0.0,
-                'message': 'Database not available',
-                'available': False
-            }), 200
-        
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT timestamp, source, action_type, context_json
-            FROM actions
-            ORDER BY timestamp DESC
-            LIMIT 100
-        """)
-        
-        rows = cursor.fetchall()
-        test_actions = []
-        for row in rows:
-            try:
-                context = json.loads(row[3]) if row[3] else {}
-            except:
-                context = {}
-            test_actions.append({
-                'timestamp': row[0],
-                'source': row[1],
-                'action_type': row[2],
-                'context': context
-            })
-        
-        # Reverse to get chronological order
-        test_actions.reverse()
-        
-        # Evaluate
-        evaluation = model_manager.evaluate_model(test_actions)
-        evaluation['available'] = True
-        
-        return jsonify(evaluation), 200
-        
-    except Exception as e:
-        return jsonify({
-            'accuracy': 0.0,
-            'avg_reward': 0.0,
-            'message': f'Evaluation error: {str(e)}',
-            'available': False
-        }), 200
-
-
-@api_bp.route('/model/info', methods=['GET'])
-def model_info():
-    """Get information about loaded model."""
-    try:
-        model_manager = current_app.config.get('model_manager')
-        if not model_manager:
-            return jsonify({
-                'loaded': False,
-                'message': 'Model manager not initialized'
-            }), 200
-        
-        # Try to reload latest model if not loaded
-        if not model_manager.model_loaded:
-            model_manager.load_latest_model()
-        
-        info = model_manager.get_model_info()
-        return jsonify(info), 200
-        
-    except Exception as e:
-        return jsonify({
-            'loaded': False,
-            'message': f'Error: {str(e)}'
-        }), 200
-
-
-@api_bp.route('/insights', methods=['GET'])
-def get_insights():
-    """Get behavioral insights."""
-    try:
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({'insights': [], 'error': 'Database not configured'}), 200
-        
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Check if we should regenerate insights
-        force_regenerate = request.args.get('regenerate', 'false').lower() == 'true'
-        
-        # Get recent insights from database
-        cursor.execute("""
-            SELECT * FROM insights 
-            ORDER BY discovered_at DESC 
-            LIMIT 20
-        """)
-        
-        db_insights = cursor.fetchall()
-        
-        # If no insights or forced regenerate, generate new ones
-        if not db_insights or force_regenerate:
-            from backend.services.insights_generator import generate_insights
-            from backend.services.llm_service import get_llm_service
-            
-            llm_service = get_llm_service()
-            if llm_service.is_available():
-                # Load user context for LLM
-                llm_service.load_user_context(conn)
-            
-            generate_insights(conn, llm_service if llm_service.is_available() else None)
-            
-            # Fetch again after generation
-            cursor.execute("""
-                SELECT * FROM insights 
-                ORDER BY discovered_at DESC 
-                LIMIT 20
-            """)
-            db_insights = cursor.fetchall()
-        
-        insights = []
-        for row in db_insights:
-            insights.append({
-                'id': row[0],
-                'discovered_at': row[1],
-                'pattern_type': row[2],
-                'description': row[3],
-                'confidence': row[4],
-                'evidence': json.loads(row[5]) if row[5] else {}
-            })
-        
-        return jsonify({'insights': insights}), 200
-        
-    except Exception as e:
-        logger = current_app.config.get('logger')
-        if logger:
-            logger.log_action('error', 'Failed to get insights', error=str(e))
-        return jsonify({'error': str(e), 'insights': []}), 200
-
-
-@api_bp.route('/insights/generate', methods=['POST'])
-def generate_insights_endpoint():
-    """Force regenerate insights."""
-    try:
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({'error': 'Database not configured'}), 500
-        
-        conn = db.connect()
-        
-        from backend.services.insights_generator import generate_insights
-        from backend.services.llm_service import get_llm_service
-        
-        llm_service = get_llm_service()
-        if llm_service.is_available():
-            # Load user context for LLM
-            llm_service.load_user_context(conn)
-        
-        insights = generate_insights(conn, llm_service if llm_service.is_available() else None)
-        
-        return jsonify({
-            'message': f'Generated {len(insights)} insights',
-            'count': len(insights)
-        }), 200
-        
-    except Exception as e:
-        logger = current_app.config.get('logger')
-        if logger:
-            logger.log_action('error', 'Failed to generate insights', error=str(e))
         return jsonify({'error': str(e)}), 500
 
 
-@api_bp.route('/sites/popular', methods=['GET'])
-def get_popular_sites():
-    """Get most popular sites from history."""
+@api_bp.route('/stats/quick', methods=['GET'])
+def get_quick_stats():
+    """Get quick stats for dashboard (optimized)."""
     try:
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({'sites': [], 'error': 'Database not configured'}), 200
+        from backend.services.distraction_tracker import get_distraction_tracker
+        from backend.services.productivity_patterns import get_productivity_pattern_analyzer
+        from backend.services.goal_service import get_goal_service
         
-        conn = db.connect()
+        today = datetime.now()
         
-        days = request.args.get('days', 7, type=int)
-        limit = request.args.get('limit', 20, type=int)
+        # Quick defaults in case of errors
+        result = {
+            'focusPercentage': 0,
+            'contextSwitches': 0,
+            'focusedTime': '0m',
+            'activeGoals': 0,
+            'peakHour': 'N/A',
+            'currentDay': today.strftime('%A, %B %d')
+        }
         
-        from backend.services.site_popularity import get_popular_sites
-        sites = get_popular_sites(conn, days, limit)
-        
-        return jsonify({'sites': sites}), 200
-        
-    except Exception as e:
-        # Use structured logger instead of console spam
-        logger = current_app.config.get('logger')
-        if logger:
-            logger.log_action('error', 'Failed to get popular sites', error=str(e))
-        return jsonify({'error': str(e), 'sites': []}), 200
-
-
-def run_training(num_epochs=50, learning_rate=0.001, batch_size=64):
-    """Run training in background thread with parameters."""
-    global training_state
-    
-    try:
-        with training_lock:
-            training_state['status'] = 'training'
-            training_state['progress'] = 0
-            training_state['started_at'] = time.time()
-            training_state['error'] = None
-        
-        # Get project root
-        project_root = Path(__file__).parent.parent.parent
-        training_script = project_root / 'training' / 'train_irl.py'
-        
-        # Store parameters in training state
-        with training_lock:
-            training_state['metrics']['learning_rate'] = learning_rate
-            training_state['config'] = {
-                'num_epochs': num_epochs,
-                'learning_rate': learning_rate,
-                'batch_size': batch_size
-            }
-        
-        # Run training script with environment variables for parameters
-        # (We'll modify train_irl.py to accept these, or pass via config override)
-        import os
-        env = os.environ.copy()
-        env['TRAINING_EPOCHS'] = str(num_epochs)
-        env['TRAINING_LR'] = str(learning_rate)
-        env['TRAINING_BATCH_SIZE'] = str(batch_size)
-        
-        process = subprocess.Popen(
-            ['python', str(training_script)],
-            cwd=str(project_root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env
-        )
-        
-        # Store process globally so we can kill it
-        global training_process
-        with training_lock:
-            training_process = process
-        
-        # Parse output for progress
-        current_epoch = 0
-        total_epochs = 50  # Default from config
-        
-        for line in process.stdout:
-            # Check if training was stopped
-            with training_lock:
-                if training_state['status'] == 'stopped':
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except:
-                        process.kill()
-                    training_state['message'] = 'Training stopped by user'
-                    training_state['completed_at'] = time.time()
-                    return
-            line = line.strip()
-            if not line:
-                continue
+        try:
+            # Get services
+            dist = get_distraction_tracker(conn)
+            prod = get_productivity_pattern_analyzer(conn)
+            goals_svc = get_goal_service(conn)
             
-            # Store log line
-            with training_lock:
-                training_state['logs'].append({
-                    'timestamp': time.time(),
-                    'message': line
-                })
-                # Keep only last MAX_LOG_LINES
-                if len(training_state['logs']) > MAX_LOG_LINES:
-                    training_state['logs'] = training_state['logs'][-MAX_LOG_LINES:]
+            start = today.replace(hour=0, minute=0, second=0).timestamp()
+            now = today.timestamp()
             
-            # Parse epoch progress
-            if 'Epoch' in line and '/' in line:
-                try:
-                    parts = line.split('Epoch')[1].split('/')
-                    if len(parts) >= 2:
-                        current_epoch = int(parts[0].strip())
-                        total_epochs = int(parts[1].split()[0])
-                        progress = int((current_epoch / total_epochs) * 100)
-                        
-                        with training_lock:
-                            training_state['current_epoch'] = current_epoch
-                            training_state['total_epochs'] = total_epochs
-                            training_state['progress'] = min(progress, 99)
-                            training_state['message'] = f'Epoch {current_epoch}/{total_epochs}'
-                except:
-                    pass
-            
-            # Parse metrics: "Loss: 0.0001 | Reward: -0.0010 ± 0.0427"
-            if '| Loss:' in line or 'Loss:' in line:
-                try:
-                    # Extract loss
-                    if 'Loss:' in line:
-                        loss_part = line.split('Loss:')[1].split('|')[0].strip()
-                        loss = float(loss_part.split()[0])
-                        
-                        # Extract reward mean and std
-                        reward_mean = None
-                        reward_std = None
-                        if 'Reward:' in line:
-                            reward_part = line.split('Reward:')[1].strip()
-                            if '±' in reward_part:
-                                parts = reward_part.split('±')
-                                reward_mean = float(parts[0].strip())
-                                reward_std = float(parts[1].strip())
-                            else:
-                                reward_mean = float(reward_part.split()[0])
-                        
-                        with training_lock:
-                            training_state['metrics'] = {
-                                'loss': loss,
-                                'reward_mean': reward_mean,
-                                'reward_std': reward_std,
-                                'learning_rate': training_state['metrics'].get('learning_rate')
-                            }
-                            # Add to history
-                            if loss is not None:
-                                training_state['history']['loss'].append(loss)
-                            if reward_mean is not None:
-                                training_state['history']['reward_mean'].append(reward_mean)
-                            if reward_std is not None:
-                                training_state['history']['reward_std'].append(reward_std)
-                except:
-                    pass
-            
-            # Check for completion
-            if 'Training Complete' in line or 'Model saved to' in line:
-                if 'Model saved to' in line:
-                    # Extract model path
-                    model_path = line.split('Model saved to')[1].strip()
-                    with training_lock:
-                        training_state['model_path'] = model_path
-        
-        process.wait()
-        
-        # Check for latest model
-        checkpoint_dir = project_root / 'models' / 'checkpoints'
-        if checkpoint_dir.exists():
-            models = sorted(checkpoint_dir.glob('reward_model_*.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
-            if models:
-                with training_lock:
-                    training_state['model_path'] = str(models[0])
-        
-        # Get metadata from training state
-        data_metadata = None
-        with training_lock:
-            training_state['status'] = 'completed'
-            training_state['progress'] = 100
-            training_state['completed_at'] = time.time()
-            training_state['message'] = 'Training completed successfully!'
-            data_metadata = training_state.get('data_metadata')
-        
-        # Save training run metadata to database
-        if data_metadata:
+            # Get data with timeouts/fallbacks
             try:
-                # We need to access the database, but we're in a background thread
-                # So we'll save it to a file that the main thread can read, or use a queue
-                # For now, we'll save it to training_state and the /model/status endpoint will save it
-                # Actually, let's try to get db from a global or save it via a callback
-                pass  # Will be handled by a separate endpoint call
+                focus_data = dist.get_focus_vs_distracted_breakdown(start, now)
+                result['focusPercentage'] = focus_data.get('focus_percentage', 0)
+                result['focusedTime'] = focus_data.get('focused_formatted', '0m')
             except:
                 pass
-        
-        # Reload model after training completes
-        # Note: We can't access current_app in background thread, so we'll reload on next request
-        # The model will be auto-loaded on backend startup anyway
             
-    except Exception as e:
-        with training_lock:
-            training_state['status'] = 'error'
-            training_state['error'] = str(e)
-            training_state['message'] = f'Training failed: {str(e)}'
-
-
-@api_bp.route('/train', methods=['POST'])
-def trigger_training():
-    """Trigger model training with optional parameters."""
-    global training_state
-    
-    with training_lock:
-        if training_state['status'] == 'training':
-            return jsonify({
-                'error': 'Training already in progress',
-                'status': 'training'
-            }), 409
-        
-        # Get training parameters from request
-        data = request.get_json() or {}
-        num_epochs = data.get('num_epochs', 50)
-        learning_rate = data.get('learning_rate', 0.001)
-        batch_size = data.get('batch_size', 64)
-        
-        # Validate parameters
-        if not (1 <= num_epochs <= 1000):
-            return jsonify({'error': 'num_epochs must be between 1 and 1000'}), 400
-        if not (0.0001 <= learning_rate <= 0.1):
-            return jsonify({'error': 'learning_rate must be between 0.0001 and 0.1'}), 400
-        if not (1 <= batch_size <= 512):
-            return jsonify({'error': 'batch_size must be between 1 and 512'}), 400
-        
-        # Check if we have enough data
-        db = current_app.config.get('db')
-        if db:
-            conn = db.connect()
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM actions")
-            count = cursor.fetchone()[0]
-            
-            if count < 100:
-                return jsonify({
-                    'error': f'Not enough data! Need at least 100 actions, have {count}',
-                    'status': 'error'
-                }), 400
-        
-        # Reset training state
-        training_state['status'] = 'queued'
-        training_state['progress'] = 0
-        training_state['message'] = 'Starting training...'
-        training_state['logs'] = []
-        training_state['metrics'] = {'loss': None, 'reward_mean': None, 'reward_std': None, 'learning_rate': learning_rate}
-        training_state['history'] = {'loss': [], 'reward_mean': [], 'reward_std': []}
-        
-        # Start training in background thread with parameters
-        thread = threading.Thread(
-            target=run_training,
-            args=(num_epochs, learning_rate, batch_size),
-            daemon=True
-        )
-        thread.start()
-        
-        return jsonify({
-            'message': 'Training started',
-            'status': 'queued',
-            'config': {
-                'num_epochs': num_epochs,
-                'learning_rate': learning_rate,
-                'batch_size': batch_size
-            }
-        }), 202
-
-
-@api_bp.route('/train/stop', methods=['POST'])
-def stop_training():
-    """Stop currently running training."""
-    global training_state, training_process
-    
-    with training_lock:
-        if training_state['status'] != 'training':
-            return jsonify({
-                'error': 'No training in progress',
-                'status': training_state['status']
-            }), 400
-        
-        # Mark as stopped
-        training_state['status'] = 'stopped'
-        training_state['message'] = 'Stopping training...'
-        
-        # Kill the process
-        if training_process:
             try:
-                training_process.terminate()
-                # Give it 5 seconds to terminate gracefully
-                try:
-                    training_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # Force kill if it doesn't terminate
-                    training_process.kill()
-                    training_process.wait()
-            except Exception as e:
-                training_state['error'] = f'Error stopping training: {str(e)}'
-        
-        training_state['completed_at'] = time.time()
-        training_state['message'] = 'Training stopped by user'
-        training_process = None
-    
-    return jsonify({
-        'message': 'Training stopped',
-        'status': 'stopped'
-    }), 200
-
-
-@api_bp.route('/model/new-data', methods=['GET'])
-def get_new_data_since_last_training():
-    """Get information about new data since last training run."""
-    try:
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({'error': 'Database not available'}), 500
-        
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Get last training run
-        cursor.execute("""
-            SELECT id, completed_at, last_timestamp, total_actions_used, first_timestamp
-            FROM training_runs
-            WHERE completed_at IS NOT NULL
-            ORDER BY completed_at DESC
-            LIMIT 1
-        """)
-        
-        last_run = cursor.fetchone()
-        
-        if not last_run:
-            # No previous training, return all data stats
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_actions,
-                    MIN(timestamp) as first_timestamp,
-                    MAX(timestamp) as last_timestamp,
-                    COUNT(DISTINCT source) as sources_count
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-            """)
-            stats = cursor.fetchone()
-            
-            return jsonify({
-                'has_previous_training': False,
-                'new_actions_count': stats[0] if stats else 0,
-                'first_timestamp': stats[1] if stats else None,
-                'last_timestamp': stats[2] if stats else None,
-                'sources_count': stats[3] if stats else 0,
-                'message': 'No previous training found. All data is new.'
-            }), 200
-        
-        last_run_id, last_completed_at, last_timestamp, total_actions_used, first_timestamp = last_run
-        
-        # Get new actions since last training
-        if last_timestamp:
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as new_actions,
-                    MIN(timestamp) as first_new_timestamp,
-                    MAX(timestamp) as last_new_timestamp,
-                    COUNT(DISTINCT source) as new_sources_count,
-                    GROUP_CONCAT(DISTINCT source) as new_sources
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-                AND timestamp > ?
-            """, (last_timestamp,))
-        else:
-            # Fallback: use completed_at time
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as new_actions,
-                    MIN(timestamp) as first_new_timestamp,
-                    MAX(timestamp) as last_new_timestamp,
-                    COUNT(DISTINCT source) as new_sources_count,
-                    GROUP_CONCAT(DISTINCT source) as new_sources
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-                AND timestamp > ?
-            """, (last_completed_at,))
-        
-        new_data = cursor.fetchone()
-        new_actions_count, first_new_timestamp, last_new_timestamp, new_sources_count, new_sources_str = new_data
-        
-        # Get action type breakdown for new data
-        if last_timestamp:
-            cursor.execute("""
-                SELECT action_type, COUNT(*) as count
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-                AND timestamp > ?
-                GROUP BY action_type
-                ORDER BY count DESC
-                LIMIT 10
-            """, (last_timestamp,))
-        else:
-            cursor.execute("""
-                SELECT action_type, COUNT(*) as count
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-                AND timestamp > ?
-                GROUP BY action_type
-                ORDER BY count DESC
-                LIMIT 10
-            """, (last_completed_at,))
-        
-        action_breakdown = [{'action_type': row[0], 'count': row[1]} for row in cursor.fetchall()]
-        
-        # Get source breakdown
-        if last_timestamp:
-            cursor.execute("""
-                SELECT source, COUNT(*) as count
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-                AND timestamp > ?
-                GROUP BY source
-                ORDER BY count DESC
-            """, (last_timestamp,))
-        else:
-            cursor.execute("""
-                SELECT source, COUNT(*) as count
-                FROM actions
-                WHERE action_type NOT IN ('dom_change', 'mouse_move', 'mouse_enter', 'mouse_leave')
-                AND timestamp > ?
-                GROUP BY source
-                ORDER BY count DESC
-            """, (last_completed_at,))
-        
-        source_breakdown = [{'source': row[0], 'count': row[1]} for row in cursor.fetchall()]
-        
-        new_sources = new_sources_str.split(',') if new_sources_str else []
-        
-        return jsonify({
-            'has_previous_training': True,
-            'last_training': {
-                'id': last_run_id,
-                'completed_at': last_completed_at,
-                'last_timestamp': last_timestamp,
-                'total_actions_used': total_actions_used
-            },
-            'new_data': {
-                'actions_count': new_actions_count or 0,
-                'first_timestamp': first_new_timestamp,
-                'last_timestamp': last_new_timestamp,
-                'sources_count': new_sources_count or 0,
-                'sources': new_sources,
-                'action_breakdown': action_breakdown,
-                'source_breakdown': source_breakdown
-            },
-            'ready_for_training': (new_actions_count or 0) >= 100,
-            'message': f'Found {new_actions_count or 0} new actions since last training' if new_actions_count else 'No new data since last training'
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@api_bp.route('/actions/search', methods=['GET'])
-def search_actions():
-    """Search actions by query string."""
-    try:
-        query = request.args.get('q', '').lower()
-        if not query:
-            return jsonify({'results': []}), 200
-        
-        db = current_app.config.get('db')
-        if not db:
-            return jsonify({'results': []}), 200
-        
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Search in action_type, source, and context_json
-        # Also search for specific action types when query mentions them
-        query_lower = query.lower()
-        action_type_conditions = []
-        params = [f'%{query}%', f'%{query}%', f'%{query}%']
-        
-        # If query mentions git, also search for git-related action types
-        if 'git' in query_lower:
-            action_type_conditions.append("action_type IN ('git_history_commit', 'git_cli_history')")
-            # Also search for git commands in terminal_command context
-            params.append(f'%git%')
-        
-        # If query mentions bash, terminal, or command, search terminal commands
-        if any(term in query_lower for term in ['bash', 'terminal', 'command', 'shell', 'zsh']):
-            action_type_conditions.append("action_type IN ('terminal_command', 'bash_history_command', 'zsh_history_command', 'python_repl_command')")
-        
-        # Build the WHERE clause
-        where_clause = """
-            LOWER(action_type) LIKE ? OR
-            LOWER(source) LIKE ? OR
-            LOWER(context_json) LIKE ?
-        """
-        if action_type_conditions:
-            where_clause += " OR " + " OR ".join(action_type_conditions)
-        
-        cursor.execute(f"""
-            SELECT id, timestamp, source, action_type, context_json
-            FROM actions
-            WHERE {where_clause}
-            ORDER BY timestamp DESC
-            LIMIT 20
-        """, tuple(params))
-        
-        rows = cursor.fetchall()
-        results = []
-        
-        for row in rows:
-            try:
-                context = json.loads(row[4]) if row[4] else {}
+                dist_data = dist.track_distractions(start, now)
+                result['contextSwitches'] = dist_data.get('context_switches', 0)
             except:
-                context = {}
+                pass
             
-            results.append({
-                'id': row[0],
-                'timestamp': row[1],
-                'source': row[2],
-                'action_type': row[3],
-                'context': context
-            })
-        
-        # Don't close connection - it's managed by DatabaseManager
-        return jsonify({'results': results}), 200
-        
-    except Exception as e:
-        return jsonify({'error': str(e), 'results': []}), 200
-
-
-@api_bp.route('/model/list', methods=['GET'])
-def list_models():
-    """List all available model checkpoints."""
-    try:
-        project_root = Path(__file__).parent.parent.parent
-        checkpoint_dir = project_root / 'models' / 'checkpoints'
-        
-        if not checkpoint_dir.exists():
-            return jsonify({'models': []}), 200
-        
-        models = []
-        model_manager = current_app.config.get('model_manager')
-        current_model_path = model_manager.model_path if model_manager else None
-        
-        for model_path in sorted(checkpoint_dir.glob('reward_model_*.pt'), key=lambda p: p.stat().st_mtime, reverse=True):
-            stat = model_path.stat()
-            # Extract date from filename: reward_model_YYYYMMDD_HHMMSS.pt
-            filename = model_path.stem
-            date_str = filename.replace('reward_model_', '')
             try:
-                # Parse YYYYMMDD_HHMMSS
-                if len(date_str) >= 15:
-                    year = date_str[:4]
-                    month = date_str[4:6]
-                    day = date_str[6:8]
-                    hour = date_str[9:11] if len(date_str) > 9 else '00'
-                    minute = date_str[11:13] if len(date_str) > 11 else '00'
-                    formatted_date = f"{year}-{month}-{day} {hour}:{minute}"
-                else:
-                    formatted_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+                peaks = prod.get_peak_hours(days=7)
+                result['peakHour'] = peaks[0][0] if peaks else 'N/A'
             except:
-                formatted_date = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+                pass
             
-            models.append({
-                'path': str(model_path),
-                'name': model_path.name,
-                'size_mb': round(stat.st_size / (1024 * 1024), 2),
-                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                'formatted_date': formatted_date,
-                'is_current': str(model_path) == current_model_path
-            })
-        
-        return jsonify({'models': models}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@api_bp.route('/model/select', methods=['POST'])
-def select_model():
-    """Select and load a specific model."""
-    try:
-        data = request.get_json()
-        model_path = data.get('model_path')
-        
-        if not model_path:
-            return jsonify({'error': 'model_path is required'}), 400
-        
-        model_manager = current_app.config.get('model_manager')
-        if not model_manager:
-            return jsonify({'error': 'Model manager not available'}), 500
-        
-        success = model_manager.load_model(model_path)
-        if success:
-            return jsonify({
-                'success': True,
-                'message': 'Model loaded successfully',
-                'model_path': model_path,
-                'model_info': model_manager.get_model_info()
-            }), 200
-        else:
-            return jsonify({'error': 'Failed to load model'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@api_bp.route('/model/status', methods=['GET'])
-def model_status():
-    """Get model training status and latest model info."""
-    global training_state
-    
-    # Save training metadata to database if available and training just completed
-    db = current_app.config.get('db')
-    if db:
-        with training_lock:
-            data_metadata = training_state.get('data_metadata')
-            if data_metadata and training_state.get('status') == 'completed':
-                try:
-                    conn = db.connect()
-                    cursor = conn.cursor()
-                    
-                    # Check if this training run was already saved
-                    cursor.execute("""
-                        SELECT id FROM training_runs 
-                        WHERE started_at = ? AND completed_at = ?
-                    """, (data_metadata.get('started_at'), data_metadata.get('completed_at')))
-                    
-                    if not cursor.fetchone():
-                        # Save training run metadata
-                        cursor.execute("""
-                            INSERT INTO training_runs 
-                            (started_at, completed_at, num_epochs, final_loss, model_path,
-                             first_action_id, last_action_id, first_timestamp, last_timestamp,
-                             total_actions_used, data_sources)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            data_metadata.get('started_at'),
-                            data_metadata.get('completed_at'),
-                            data_metadata.get('num_epochs'),
-                            data_metadata.get('final_loss'),
-                            data_metadata.get('model_path'),
-                            data_metadata.get('first_action_id'),
-                            data_metadata.get('last_action_id'),
-                            data_metadata.get('first_timestamp'),
-                            data_metadata.get('last_timestamp'),
-                            data_metadata.get('total_actions'),
-                            json.dumps(data_metadata.get('sources', []))
-                        ))
-                        conn.commit()
-                        # Clear metadata from state to prevent duplicate saves
-                        training_state['data_metadata'] = None
-                    # Don't close connection - it's managed by DatabaseManager
-                except Exception as e:
-                    # Log error but don't fail the request
-                    pass
-    
-    with training_lock:
-        status = training_state.copy()
-        # Don't send all logs in status, use separate endpoint
-        # But include last 10 lines for quick preview
-        if 'logs' in status:
-            status['recent_logs'] = status['logs'][-10:]
-            del status['logs']  # Remove full logs to reduce payload
-        # Keep history for charts
-        if 'history' in status:
-            # Limit history to last 100 points for performance
-            if status['history'].get('loss'):
-                status['history']['loss'] = status['history']['loss'][-100:]
-            if status['history'].get('reward_mean'):
-                status['history']['reward_mean'] = status['history']['reward_mean'][-100:]
-            if status['history'].get('reward_std'):
-                status['history']['reward_std'] = status['history']['reward_std'][-100:]
-    
-    # Check for latest model if not in state
-    if not status.get('model_path'):
-        project_root = Path(__file__).parent.parent.parent
-        checkpoint_dir = project_root / 'models' / 'checkpoints'
-        if checkpoint_dir.exists():
-            models = sorted(checkpoint_dir.glob('reward_model_*.pt'), key=lambda p: p.stat().st_mtime, reverse=True)
-            if models:
-                model_path = models[0]
-                status['model_path'] = str(model_path)
-                status['model_exists'] = True
-                status['model_size_mb'] = round(model_path.stat().st_size / (1024 * 1024), 2)
-                status['model_modified'] = datetime.fromtimestamp(model_path.stat().st_mtime).isoformat()
-            else:
-                status['model_exists'] = False
-        else:
-            status['model_exists'] = False
-    
-    # Determine overall status
-    if status['status'] == 'idle' and status.get('model_exists'):
-        status['status'] = 'trained'
-        # Clear training history/metrics when not actively training
-        if not status.get('started_at'):
-            status['history'] = {'loss': [], 'reward_mean': [], 'reward_std': []}
-            status['metrics'] = {'loss': None, 'reward_mean': None, 'reward_std': None, 'learning_rate': None}
-            status['progress'] = 0
-            status['current_epoch'] = 0
-            status['total_epochs'] = 0
-    elif status['status'] == 'idle':
-        status['status'] = 'not_trained'
-        # Clear training history/metrics when not trained
-        status['history'] = {'loss': [], 'reward_mean': [], 'reward_std': []}
-        status['metrics'] = {'loss': None, 'reward_mean': None, 'reward_std': None, 'learning_rate': None}
-        status['progress'] = 0
-        status['current_epoch'] = 0
-        status['total_epochs'] = 0
-    
-    # Add action type counts for color coding and total actions
-    if db:
-        try:
-            conn = db.connect()
-            cursor = conn.cursor()
-            
-            # Get total actions count
-            cursor.execute("SELECT COUNT(*) FROM actions")
-            total_actions = cursor.fetchone()[0]
-            status['total_actions'] = total_actions
-            
-            # Get action type counts
-            cursor.execute("""
-                SELECT action_type, COUNT(*) as count
-                FROM actions
-                GROUP BY action_type
-                ORDER BY count DESC
-                LIMIT 20
-            """)
-            rows = cursor.fetchall()
-            action_type_counts = {row[0]: row[1] for row in rows}
-            status['data_sources'] = action_type_counts  # Reusing key name for compatibility
-            # Don't close connection - it's managed by DatabaseManager
+            try:
+                active_goals = goals_svc.get_active_goals()
+                result['activeGoals'] = len(active_goals)
+            except:
+                pass
+                
         except Exception as e:
-            # Silent fail
-            pass
-    
-    return jsonify(status), 200
-
-
-@api_bp.route('/training/logs', methods=['GET'])
-def get_training_logs():
-    """Get training logs."""
-    global training_state
-    
-    with training_lock:
-        logs = training_state.get('logs', [])
-        # Return last N lines
-        limit = request.args.get('limit', 100, type=int)
-        return jsonify({
-            'logs': logs[-limit:],
-            'total': len(logs)
-        }), 200
-
-
-@api_bp.route('/recent-actions', methods=['GET'])
-def recent_actions():
-    """Get recent actions with filtering and sorting."""
-    try:
-        limit = request.args.get('limit', 100, type=int)
-        source_filter = request.args.get('source', None)  # Filter by source
-        action_type_filter = request.args.get('action_type', None)  # Filter by action type
-        sort_by = request.args.get('sort', 'timestamp')  # Sort by: timestamp, source, action_type
-        order = request.args.get('order', 'desc')  # Order: asc, desc
+            # Log error but return defaults
+            print(f"Error in stats/quick: {e}")
         
-        db = current_app.config.get('db')
-        session_id = current_app.config.get('current_session_id', '')
-        
-        if not db:
-            return jsonify({'actions': [], 'total': 0}), 200
-        
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Build query with filters - show ALL actions (not just current session)
-        # This allows viewing historical data even after backend restart
-        query = "SELECT id, timestamp, source, action_type, context_json FROM actions WHERE 1=1"
-        params = []
-        
-        if source_filter:
-            query += " AND source = ?"
-            params.append(source_filter)
-        
-        if action_type_filter:
-            query += " AND action_type = ?"
-            params.append(action_type_filter)
-        
-        # Validate sort column
-        valid_sorts = ['timestamp', 'source', 'action_type']
-        if sort_by not in valid_sorts:
-            sort_by = 'timestamp'
-        
-        # Validate order
-        order = 'DESC' if order.lower() == 'desc' else 'ASC'
-        
-        query += f" ORDER BY {sort_by} {order} LIMIT ?"
-        params.append(limit)
-        
-        cursor.execute(query, params)
-        
-        actions = []
-        for row in cursor.fetchall():
-            try:
-                context = json.loads(row[4]) if row[4] else {}
-            except:
-                context = {}
-            actions.append({
-                'id': row[0],
-                'timestamp': row[1],
-                'source': row[2],
-                'action_type': row[3],
-                'context': context
-            })
-        
-        # Get total count for pagination - show ALL actions
-        count_query = "SELECT COUNT(*) FROM actions WHERE 1=1"
-        count_params = []
-        if source_filter:
-            count_query += " AND source = ?"
-            count_params.append(source_filter)
-        if action_type_filter:
-            count_query += " AND action_type = ?"
-            count_params.append(action_type_filter)
-        
-        cursor.execute(count_query, count_params)
-        total = cursor.fetchone()[0]
-        
-        return jsonify({
-            'actions': actions,
-            'total': total,
-            'limit': limit,
-            'filters': {
-                'source': source_filter,
-                'action_type': action_type_filter
-            },
-            'sort': {
-                'by': sort_by,
-                'order': order.lower()
-            }
-        }), 200
-        
+        return jsonify(result)
     except Exception as e:
-        return jsonify({'actions': [], 'total': 0, 'error': str(e)}), 200
+        return jsonify({'error': str(e)}), 500
 
 
+@api_bp.route('/stats/activity', methods=['GET'])
+def get_activity():
+    """Get 24-hour activity chart data."""
+    try:
+        from backend.services.productivity_patterns import get_productivity_pattern_analyzer
+        
+        prod = get_productivity_pattern_analyzer(conn)
+        
+        today = datetime.now()
+        start = today.replace(hour=0, minute=0, second=0).timestamp()
+        now = today.timestamp()
+        
+        hourly = prod.analyze_hourly_productivity(start, now)
+        
+        # Format for chart
+        data = [
+            {'hour': hour, 'productivity': score}
+            for hour, score in hourly.items()
+        ]
+        
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/stats/heatmap', methods=['GET'])
+def get_heatmap():
+    """Get productivity heatmap data."""
+    try:
+        from backend.services.productivity_patterns import get_productivity_pattern_analyzer
+        from flask import request
+        
+        days = int(request.args.get('days', 7))
+        prod = get_productivity_pattern_analyzer(conn)
+        
+        heatmap = prod.generate_heatmap_data(days=days)
+        
+        return jsonify(heatmap)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/sessions', methods=['POST'])
+def create_session():
+    """Manually log a work session."""
+    try:
+        from backend.services.session_detector import get_session_detector
+        from flask import request
+        
+        data = request.json
+        if not data or 'project' not in data or 'duration' not in data:
+            return jsonify({'error': 'Missing project or duration'}), 400
+            
+        sess = get_session_detector(conn)
+        
+        session_id = sess.create_session(
+            project=data['project'],
+            session_type=data.get('session_type', 'coding'),
+            duration_minutes=int(data['duration']),
+            start_time=data.get('start_time')
+        )
+        
+        return jsonify({'id': session_id, 'message': 'Session logged successfully'}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/sessions', methods=['GET'])
+def get_sessions():
+    """Get work sessions."""
+    try:
+        from backend.services.session_detector import get_session_detector
+        
+        sess = get_session_detector(conn)
+        
+        # Get date range from query params
+        today = datetime.now().strftime('%Y-%m-%d')
+        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        
+        sessions = sess.get_session_summary_by_day(week_ago, today)
+        
+        return jsonify(sessions)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/habits', methods=['GET'])
+def get_habits():
+    """Get habit tracking data."""
+    try:
+        from backend.services.habit_analyzer import get_habit_analyzer
+        
+        habits_svc = get_habit_analyzer(conn)
+        summary = habits_svc.get_all_habits_summary()
+        
+        return jsonify(summary)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/habits', methods=['POST'])
+def create_habit():
+    """Create a new habit."""
+    try:
+        from backend.services.habit_analyzer import get_habit_analyzer
+        from flask import request
+        
+        data = request.json
+        if not data or 'name' not in data or 'description' not in data:
+            return jsonify({'error': 'Missing name or description'}), 400
+            
+        habits_svc = get_habit_analyzer(conn)
+        
+        habits_svc.create_habit(
+            name=data['name'],
+            description=data['description'],
+            target_value=data.get('target_value', 1),
+            unit=data.get('unit', 'count'),
+            keywords=data.get('keywords', [])
+        )
+        
+        return jsonify({'message': 'Habit created successfully'}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/goals', methods=['GET'])
+def get_goals():
+    """Get active goals."""
+    try:
+        from backend.services.goal_service import get_goal_service
+        
+        goals_svc = get_goal_service(conn)
+        goals = goals_svc.get_active_goals()
+        
+        # Add progress and alignment (mocked for now)
+        for goal in goals:
+            goal['progress'] = 50  # TODO: Calculate actual progress
+            goal['alignmentPercentage'] = 65  # TODO: Calculate from alignment
+        
+        return jsonify(goals)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/goals', methods=['POST'])
+def create_goal():
+    """Create a new goal."""
+    try:
+        from backend.services.goal_service import get_goal_service
+        from flask import request
+        
+        data = request.json
+        if not data or 'goal_text' not in data:
+            return jsonify({'error': 'Missing goal_text'}), 400
+            
+        goals_svc = get_goal_service(conn)
+        
+        # Parse target date if provided
+        target_date = None
+        if 'target_date' in data and data['target_date']:
+            try:
+                dt = datetime.strptime(data['target_date'], '%Y-%m-%d')
+                target_date = dt.timestamp()
+            except ValueError:
+                pass
+        
+        goal_id = goals_svc.create_goal(
+            goal_text=data['goal_text'],
+            keywords=data.get('keywords', []),
+            target_date=target_date,
+            category=data.get('category', 'general')
+        )
+        
+        return jsonify({'id': goal_id, 'message': 'Goal created successfully'}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/insights/predictions', methods=['GET'])
+def get_predictions():
+    """Get productivity predictions."""
+    try:
+        from backend.services.productivity_predictor import get_productivity_predictor
+        
+        predictor = get_productivity_predictor(conn)
+        prediction = predictor.predict_today()
+        
+        return jsonify(prediction)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/insights/patterns', methods=['GET'])
+def get_patterns():
+    """Get productive work patterns."""
+    try:
+        from backend.services.pattern_detector import get_pattern_detector
+        
+        patterns_svc = get_pattern_detector(conn)
+        patterns = patterns_svc.detect_work_environments(days=14)
+        
+        return jsonify(patterns if patterns else [])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/insights/blockers', methods=['GET'])
+def get_blockers():
+    """Get productivity blockers."""
+    try:
+        from backend.services.pattern_detector import get_pattern_detector
+        
+        patterns_svc = get_pattern_detector(conn)
+        blockers = patterns_svc.identify_blockers(days=14)
+        
+        return jsonify(blockers if blockers else [])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/notifications', methods=['GET'])
+def get_notifications():
+    """Get pending notifications."""
+    try:
+        from backend.services.notification_service import get_notification_service
+        
+        notif = get_notification_service(conn)
+        notifications = notif.get_all_pending_notifications()
+        
+        return jsonify(notifications)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint."""
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})

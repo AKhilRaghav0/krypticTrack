@@ -44,11 +44,11 @@ log_file = backend_config.get('log_file', 'logs/backend.log')
 setup_logging(log_level=log_level, log_file=log_file)
 logger = get_logger("app")
 
-# Setup rate limiting
+# Setup rate limiting (increased for extension popup auto-refresh)
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"],
+    default_limits=["5000 per day", "1000 per hour"],  # Extension refreshes every 5s = ~720/hour
     storage_uri="memory://",  # Use in-memory storage (can switch to Redis in production)
 )
 
@@ -77,7 +77,7 @@ cursor.execute("""
 conn.commit()
 
 # Register blueprints
-app.register_blueprint(api_bp, url_prefix='/api')
+app.register_blueprint(api_bp)  # Already has /api prefix
 app.register_blueprint(llm_bp, url_prefix='/api/llm')
 app.register_blueprint(work_session_bp, url_prefix='/api/work-session')
 cleanup_bp = create_cleanup_endpoint()

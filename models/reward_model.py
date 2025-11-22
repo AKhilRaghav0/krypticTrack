@@ -202,19 +202,16 @@ class RewardModel(nn.Module):
             ResidualBlock(hidden_dim),
         )
         
-        # === CROSS-ATTENTION (state-action interaction) ===
-        self.cross_attention = CrossAttention(
-            state_dim=hidden_dim,
-            action_dim=hidden_dim,
-            hidden_dim=hidden_dim,
-            num_heads=8
-        )
-        
-        # === TRANSFORMER BLOCKS (feature refinement) ===
-        self.transformer_blocks = nn.Sequential(
-            TransformerBlock(hidden_dim, num_heads=8),
-            TransformerBlock(hidden_dim, num_heads=8),
-        )
+        # === SIMPLIFIED CROSS-ATTENTION (state-action interaction) ===
+        # Direct cross-attention without redundant projection since features are pre-encoded
+        self.cross_attention_q = nn.Linear(hidden_dim, hidden_dim)
+        self.cross_attention_k = nn.Linear(hidden_dim, hidden_dim)
+        self.cross_attention_v = nn.Linear(hidden_dim, hidden_dim)
+        self.cross_attention_out = nn.Linear(hidden_dim, hidden_dim)
+        self.cross_attention_norm = nn.LayerNorm(hidden_dim)
+        self.cross_attention_dropout = nn.Dropout(0.1)
+        self.num_heads = 8
+        self.head_dim = hidden_dim // 8
         
         # === DEEP RESIDUAL NETWORK (reward prediction) ===
         layers = []
@@ -272,20 +269,33 @@ class RewardModel(nn.Module):
         state_feat = self.state_encoder(state)  # [B, hidden_dim]
         action_feat = self.action_encoder(action)  # [B, hidden_dim]
         
-        # Cross-attention: learn state-action interactions
-        fused_feat = self.cross_attention(state_feat, action_feat)  # [B, hidden_dim]
+        # Simplified cross-attention: learn state-action interactions
+        B = state_feat.shape[0]
         
-        # Add residual connection from state
-        fused_feat = fused_feat + state_feat
+        # Concatenate state and action for cross-attention [B, 2, hidden_dim]
+        x = torch.stack([state_feat, action_feat], dim=1)
         
-        # Transformer blocks: refine features with self-attention
-        # Reshape for transformer (needs sequence dimension)
-        fused_feat = fused_feat.unsqueeze(1)  # [B, 1, hidden_dim]
-        refined_feat = self.transformer_blocks(fused_feat)  # [B, 1, hidden_dim]
-        refined_feat = refined_feat.squeeze(1)  # [B, hidden_dim]
+        # Multi-head attention
+        q = self.cross_attention_q(x).reshape(B, 2, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.cross_attention_k(x).reshape(B, 2, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.cross_attention_v(x).reshape(B, 2, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Attention scores
+        scale = self.head_dim ** -0.5
+        attn = (q @ k.transpose(-2, -1)) * scale
+        attn = attn.softmax(dim=-1)
+        attn = self.cross_attention_dropout(attn)
+        
+        # Apply attention and reshape
+        out = (attn @ v).transpose(1, 2).reshape(B, 2, -1)
+        out = self.cross_attention_out(out)
+        out = self.cross_attention_norm(out)
+        
+        # Pool and add residual
+        fused_feat = out.mean(dim=1) + state_feat  # [B, hidden_dim]
         
         # Deep residual network for reward prediction
-        reward_feat = self.reward_network(refined_feat)  # [B, final_dim]
+        reward_feat = self.reward_network(fused_feat)  # [B, final_dim]
         
         # Final output
         reward = self.output(reward_feat)  # [B, 1]
@@ -314,89 +324,32 @@ class RewardModel(nn.Module):
     def count_parameters(self) -> int:
         """Count total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-
-class PolicyNetwork(nn.Module):
-    """
-    BEAST Policy Network - Enhanced architecture.
-    Learns optimal policy π(a|s) given reward function.
-    """
     
-    def __init__(self, state_dim: int = 192, action_dim: int = 48, hidden_dims: list = None):
-        """
-        Initialize BEAST policy network.
-        
-        Args:
-            state_dim: Dimension of state vector
-            action_dim: Dimension of action vector (output)
-            hidden_dims: List of hidden layer dimensions
-        """
-        super(PolicyNetwork, self).__init__()
-        
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        
-        if hidden_dims is None:
-            hidden_dims = [512, 256]
-        
-        # Build network with residual blocks
-        layers = []
-        prev_dim = state_dim
-        
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(nn.GELU())
-            layers.append(ResidualBlock(hidden_dim))
-            layers.append(nn.Dropout(0.1))
-            prev_dim = hidden_dim
-        
-        self.network = nn.Sequential(*layers)
-        
-        # Output layer: action probabilities
-        self.output = nn.Sequential(
-            nn.Linear(prev_dim, action_dim),
-            nn.LayerNorm(action_dim),
-            nn.Softmax(dim=-1)
-        )
-        
-        # Initialize weights
-        self._initialize_weights()
+    def parameter_breakdown(self) -> dict:
+        """Get detailed parameter count breakdown by component."""
+        breakdown = {}
+        breakdown['state_encoder'] = sum(p.numel() for p in self.state_encoder.parameters() if p.requires_grad)
+        breakdown['action_encoder'] = sum(p.numel() for p in self.action_encoder.parameters() if p.requires_grad)
+        breakdown['cross_attention'] = sum(p.numel() for n, p in self.named_parameters() if 'cross_attention' in n and p.requires_grad)
+        breakdown['reward_network'] = sum(p.numel() for p in self.reward_network.parameters() if p.requires_grad)
+        breakdown['output'] = sum(p.numel() for p in self.output.parameters() if p.requires_grad)
+        breakdown['total'] = self.count_parameters()
+        return breakdown
     
-    def _initialize_weights(self):
-        """Initialize network weights."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.constant_(module.weight, 1.0)
-                nn.init.constant_(module.bias, 0.0)
-    
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: compute action probabilities π(a|s).
+    def architecture_summary(self) -> str:
+        """Get human-readable architecture summary."""
+        params = self.count_parameters()
+        breakdown = self.parameter_breakdown()
         
-        Args:
-            state: State tensor [batch_size, state_dim]
-            
-        Returns:
-            Action probabilities [batch_size, action_dim]
-        """
-        x = self.network(state)
-        return self.output(x)
-    
-    def sample_action(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        Sample action from policy.
-        
-        Args:
-            state: State tensor [state_dim] or [batch_size, state_dim]
-            
-        Returns:
-            Sampled action index [batch_size]
-        """
-        probs = self.forward(state)
-        dist = torch.distributions.Categorical(probs)
-        return dist.sample()
+        summary = f"RewardModel Architecture (Optimized BEAST)\n"
+        summary += f"{'='*50}\n"
+        summary += f"Total Parameters: {params:,} (~{params/1e6:.2f}M)\n\n"
+        summary += f"Component Breakdown:\n"
+        for name, count in breakdown.items():
+            if name != 'total':
+                pct = (count / params * 100) if params > 0 else 0
+                summary += f"  {name:20s}: {count:>10,} ({pct:>5.1f}%)\n"
+        summary += f"\nInput/Output Dimensions:\n"
+        summary += f"  State dim:  {self.state_dim}\n"
+        summary += f"  Action dim: {self.action_dim}\n"
+        return summary

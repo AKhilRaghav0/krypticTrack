@@ -11,7 +11,7 @@ import numpy as np
 from typing import List, Tuple, Dict
 from tqdm import tqdm
 
-from models.reward_model import RewardModel, PolicyNetwork
+from models.reward_model import RewardModel
 
 
 class ExpertTrajectoryDataset(Dataset):
@@ -113,10 +113,7 @@ class MaxEntIRL:
         # Initialize reward model
         self.reward_model = RewardModel(state_dim, action_dim).to(self.device)
         
-        # Initialize policy network (for computing optimal policy)
-        self.policy = PolicyNetwork(state_dim, action_dim).to(self.device)
-        
-        # Optimizers - Use AdamW (better weight decay) with optimized settings
+        # Optimizer - Use AdamW (better weight decay) with optimized settings
         self.reward_optimizer = optim.AdamW(
             self.reward_model.parameters(),
             lr=learning_rate,
@@ -126,70 +123,11 @@ class MaxEntIRL:
             amsgrad=False
         )
         
-        self.policy_optimizer = optim.AdamW(
-            self.policy.parameters(),
-            lr=learning_rate * 0.1,  # Slower learning for policy
-            weight_decay=1e-4,
-            betas=(0.9, 0.999),
-            eps=1e-8
-        )
-        
-        # Learning rate schedulers (will be initialized in train method)
+        # Learning rate scheduler (will be initialized in train method)
         self.reward_scheduler = None
-        self.policy_scheduler = None
         
         # Loss function
         self.criterion = nn.MSELoss()
-    
-    def compute_optimal_policy(self, states: torch.Tensor, num_iterations: int = 10) -> PolicyNetwork:
-        """
-        Compute optimal policy π*(a|s) given current reward function.
-        
-        Uses policy gradient to find policy that maximizes expected reward.
-        
-        Args:
-            states: Batch of states [batch_size, state_dim]
-            num_iterations: Number of policy optimization steps
-            
-        Returns:
-            Updated policy network
-        """
-        self.policy.train()
-        
-        for _ in range(num_iterations):
-            # Sample actions from current policy
-            action_probs = self.policy(states)
-            
-            # Compute expected reward for each state-action pair
-            # (This is simplified - full implementation would use value iteration)
-            rewards = []
-            for i in range(states.size(0)):
-                state = states[i:i+1]
-                # Sample multiple actions and compute average reward
-                sampled_actions = []
-                for _ in range(10):  # Sample 10 actions
-                    action_idx = self.policy.sample_action(state)
-                    # Convert action index to action vector (simplified)
-                    action_vec = torch.zeros(self.action_dim)
-                    action_vec[action_idx] = 1.0
-                    sampled_actions.append(action_vec)
-                
-                # Compute average reward
-                avg_reward = torch.mean(torch.stack([
-                    self.reward_model(state, action.unsqueeze(0))
-                    for action in sampled_actions
-                ]))
-                rewards.append(avg_reward)
-            
-            # Policy gradient update (simplified)
-            # In full MaxEnt IRL, this would use value iteration or policy iteration
-            loss = -torch.mean(torch.stack(rewards))  # Maximize expected reward
-            
-            self.policy_optimizer.zero_grad()
-            loss.backward()
-            self.policy_optimizer.step()
-        
-        return self.policy
     
     def train(
         self,
@@ -248,13 +186,10 @@ class MaxEntIRL:
         patience_counter = 0
         best_model_state = None
         
-        # Initialize learning rate schedulers
+        # Initialize learning rate scheduler
         # ReduceLROnPlateau - adaptive LR reduction when loss plateaus
         self.reward_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.reward_optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7
-        )
-        self.policy_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.policy_optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-8
         )
         
         print(f"\n🚀 Starting MaxEnt IRL Training (Optimized)")
@@ -314,17 +249,19 @@ class MaxEntIRL:
                 # Combined loss
                 loss = margin_loss + 0.01 * reward_l2 + entropy_reg
                 
-                # Backward pass with gradient clipping and accumulation
-                self.reward_optimizer.zero_grad()
+                # Gradient accumulation: accumulate over 4 steps for effective 4x batch size
+                accumulation_steps = 4
+                loss = loss / accumulation_steps
+                
+                # Backward pass
                 loss.backward()
                 
-                # Gradient clipping (prevents exploding gradients)
-                torch.nn.utils.clip_grad_norm_(self.reward_model.parameters(), max_norm=1.0)
-                
-                # Optional: gradient accumulation for effective larger batch size
-                # (Not using here, but can be added if needed)
-                
-                self.reward_optimizer.step()
+                # Update weights every accumulation_steps batches
+                if (len(epoch_losses) + 1) % accumulation_steps == 0:
+                    # Gradient clipping (prevents exploding gradients)
+                    torch.nn.utils.clip_grad_norm_(self.reward_model.parameters(), max_norm=1.0)
+                    self.reward_optimizer.step()
+                    self.reward_optimizer.zero_grad()
                 
                 epoch_losses.append(loss.item())
                 epoch_rewards.extend(predicted_rewards.cpu().detach().numpy().flatten())
@@ -375,11 +312,10 @@ class MaxEntIRL:
                 history['val_reward_mean'].append(val_reward_mean)
                 history['val_reward_std'].append(val_reward_std)
             
-            # Update learning rate schedulers
+            # Update learning rate scheduler
             current_loss = val_loss if val_loss is not None else avg_loss
             # ReduceLROnPlateau (adaptive based on loss)
             self.reward_scheduler.step(current_loss)
-            self.policy_scheduler.step(current_loss)
             
             # Get current learning rate for logging
             current_lr = self.reward_optimizer.param_groups[0]['lr']
@@ -394,7 +330,6 @@ class MaxEntIRL:
                 import copy
                 best_model_state = {
                     'reward_model': copy.deepcopy(self.reward_model.state_dict()),
-                    'policy': copy.deepcopy(self.policy.state_dict()),
                     'epoch': epoch + 1
                 }
             else:
@@ -421,7 +356,6 @@ class MaxEntIRL:
                 # Restore best model
                 if best_model_state:
                     self.reward_model.load_state_dict(best_model_state['reward_model'])
-                    self.policy.load_state_dict(best_model_state['policy'])
                 break
         
         if patience_counter < early_stopping_patience:
@@ -448,22 +382,45 @@ class MaxEntIRL:
             reward = self.reward_model(state_tensor, action_tensor)
             return reward.item()
     
-    def save_model(self, path: str):
-        """Save trained model."""
-        torch.save({
+    def save_model(self, path: str, dataset: ExpertTrajectoryDataset = None):
+        """Save trained model with normalization parameters.
+        
+        Args:
+            path: Path to save model checkpoint
+            dataset: Optional dataset to extract normalization parameters from
+        """
+        checkpoint = {
             'reward_model_state_dict': self.reward_model.state_dict(),
-            'policy_state_dict': self.policy.state_dict(),
             'state_dim': self.state_dim,
             'action_dim': self.action_dim,
-        }, path)
+        }
+        
+        # Save normalization parameters if dataset provided
+        if dataset is not None:
+            checkpoint['normalization'] = {
+                'state_mean': dataset.state_mean,
+                'state_std': dataset.state_std,
+                'action_mean': dataset.action_mean,
+                'action_std': dataset.action_std
+            }
+        
+        torch.save(checkpoint, path)
         print(f"✅ Model saved to {path}")
     
+    
     def load_model(self, path: str):
-        """Load trained model."""
+        """Load trained model.
+        
+        Args:
+            path: Path to model checkpoint
+        """
         checkpoint = torch.load(path, map_location=self.device)
         self.reward_model.load_state_dict(checkpoint['reward_model_state_dict'])
-        self.policy.load_state_dict(checkpoint['policy_state_dict'])
-        print(f"✅ Model loaded from {path}")
-
-
-
+        
+        # Load normalization parameters if available
+        if 'normalization' in checkpoint:
+            self.normalization_params = checkpoint['normalization']
+            print(f"✅ Model loaded from {path} (with normalization parameters)")
+        else:
+            self.normalization_params = None
+            print(f"✅ Model loaded from {path} (no normalization parameters found)")

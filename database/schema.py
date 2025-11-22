@@ -78,21 +78,17 @@ def create_tables(db_connection):
         )
     """)
     
-    # Work Sessions (daily work goals and analysis)
+    # Work Sessions (automated session detection)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS work_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,  -- YYYY-MM-DD format
             start_time REAL NOT NULL,
-            end_time REAL,
-            planned_work TEXT,  -- What user planned to work on
-            actual_summary TEXT,  -- LLM-generated summary of actual work
-            time_wasted_minutes REAL,  -- Time wasted on distractions
-            idle_time_minutes REAL,  -- Time spent idle
-            focused_time_minutes REAL,  -- Time spent focused
-            distractions TEXT,  -- JSON array of distractions
-            achievements TEXT,  -- JSON array of achievements
-            insights TEXT,  -- LLM-generated insights
+            end_time REAL NOT NULL,
+            duration_seconds REAL NOT NULL,
+            action_count INTEGER NOT NULL,
+            project TEXT,  -- Detected project name
+            session_type TEXT,  -- 'coding', 'research', 'debugging', 'mixed'
+            metadata TEXT,  -- JSON with full details (files, apps, commands, etc.)
             created_at REAL DEFAULT (strftime('%s', 'now'))
         )
     """)
@@ -153,9 +149,79 @@ def create_tables(db_connection):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_insights_discovered ON insights(discovered_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_training_runs_started ON training_runs(started_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_work_sessions_date ON work_sessions(date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_work_sessions_start_time ON work_sessions(start_time)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_work_sessions_project ON work_sessions(project)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_work_sessions_type ON work_sessions(session_type)")
+    
+    # User Goals tables
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_text TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            target_date REAL,
+            status TEXT DEFAULT 'active',
+            keywords TEXT,
+            category TEXT,
+            metadata TEXT
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS goal_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            relevant_actions INTEGER DEFAULT 0,
+            total_actions INTEGER DEFAULT 0,
+            time_spent_seconds REAL DEFAULT 0,
+            summary TEXT,
+            FOREIGN KEY (goal_id) REFERENCES user_goals(id)
+        )
+    """)
+    
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_goals_status ON user_goals(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_goal_progress_date ON goal_progress(date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_goal_progress_goal_id ON goal_progress(goal_id)")
     
     db_connection.commit()
     print("✅ Database tables created successfully")
+    create_habit_tables(db_connection)
 
+
+def create_habit_tables(conn):
+    """Create tables for habit tracking."""
+    cursor = conn.cursor()
+    
+    # User-defined habits
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_habits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            target_value REAL,
+            unit TEXT,
+            keywords TEXT,
+            active BOOLEAN DEFAULT 1,
+            created_at REAL DEFAULT (strftime('%s', 'now'))
+        )
+    """)
+    
+    # Daily habit tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS habit_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            completed BOOLEAN DEFAULT 0,
+            value REAL,
+            metadata TEXT,
+            UNIQUE(habit_name, date)
+        )
+    """)
+    
+    # Indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_habit_tracking_date ON habit_tracking(date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_habit_tracking_name ON habit_tracking(habit_name)")
+    
+    conn.commit()
